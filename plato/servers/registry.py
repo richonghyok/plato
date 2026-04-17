@@ -5,11 +5,20 @@ federated learning server.
 Having a registry of all available classes is convenient for retrieving an
 instance based on a configuration at run-time.
 """
+
 import logging
 
 from plato.config import Config
-
-from plato.servers import fedavg, fedavg_cs, mistnet, fedavg_gan, fedavg_personalized
+from plato.servers import (
+    fedavg,
+    fedavg_cs,
+    fedavg_gan,
+    fedavg_mpc_additive,
+    fedavg_mpc_shamir,
+    fedavg_personalized,
+    pfedgraph,
+    split_learning,
+)
 
 if hasattr(Config().server, "type") and Config().server.type == "fedavg_he":
     # FedAvg server with homomorphic encryption supports PyTorch only
@@ -20,15 +29,20 @@ if hasattr(Config().server, "type") and Config().server.type == "fedavg_he":
 else:
     registered_servers = {
         "fedavg": fedavg.Server,
+        "fedavg_lora": fedavg.Server,
         "fedavg_cross_silo": fedavg_cs.Server,
-        "mistnet": mistnet.Server,
         "fedavg_gan": fedavg_gan.Server,
-        "fedavg_personalized": fedavg_personalized.Server
+        "fedavg_personalized": fedavg_personalized.Server,
+        "fedavg_mpc_additive": fedavg_mpc_additive.Server,
+        "fedavg_mpc_shamir": fedavg_mpc_shamir.Server,
+        "pfedgraph": pfedgraph.Server,
+        "split_learning": split_learning.Server,
     }
 
 
 def get(model=None, algorithm=None, trainer=None):
     """Get an instance of the server."""
+
     if hasattr(Config().server, "type"):
         server_type = Config().server.type
     else:

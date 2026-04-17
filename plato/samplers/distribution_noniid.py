@@ -8,7 +8,7 @@ This sampler can introduce the hardest non-IID data scenarios because it contain
         The number of classes contained in clients follows the Dirichlet distribution
         that is parameterized by the "label_concentration".
     - Quantity skewness - equals to the sampler called "sample_quantity_noniid.py".
-	    The local dataset sizes of clients follow the  Dirichlet distribution that is
+            The local dataset sizes of clients follow the  Dirichlet distribution that is
         parameterized by the "client_quantity_concentration".
 
     For example,
@@ -34,14 +34,13 @@ This sampler can introduce the hardest non-IID data scenarios because it contain
                 ...
                 clientN 1       50      1      1      1
 """
+
 import numpy as np
 import torch
-
-from torch.utils.data import WeightedRandomSampler, SubsetRandomSampler
+from torch.utils.data import SubsetRandomSampler, WeightedRandomSampler
 
 from plato.config import Config
-from plato.samplers import base
-from plato.samplers import sampler_utils
+from plato.samplers import base, sampler_utils
 
 
 class Sampler(base.Sampler):
@@ -91,7 +90,7 @@ class Sampler(base.Sampler):
             concentration=client_quantity_concentration,
             min_partition_size=None,
             number_partitions=total_clients,
-        )[client_id]
+        )[client_id - 1]
 
         self.client_partition_size = int(total_data_size * self.client_partition)
         self.client_partition_size = max(self.client_partition_size, min_partition_size)

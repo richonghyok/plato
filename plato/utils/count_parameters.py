@@ -1,21 +1,40 @@
-from prettytable import PrettyTable
+import importlib
+from typing import Any
+
 import torch
 
-def count_parameters(model):
+
+def _load_prettytable() -> Any:
+    try:
+        module = importlib.import_module("prettytable")
+        return getattr(module, "PrettyTable")
+    except (ImportError, AttributeError):
+        return None
+
+
+PrettyTable = _load_prettytable()
+
+
+def count_parameters(model: torch.nn.Module) -> int:
+    if PrettyTable is None:
+        raise ImportError("prettytable is required to format parameter counts.")
+
     table = PrettyTable(["Modules", "Parameters"])
     total_params = 0
     for name, parameter in model.named_parameters():
-        if not parameter.requires_grad: continue
+        if not parameter.requires_grad:
+            continue
         params = parameter.numel()
         table.add_row([name, params])
-        total_params+=params
+        total_params += params
     print(table)
     print(f"Total Trainable Params: {total_params}")
     return total_params
 
-resnet18 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
-mobilenet = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v2', pretrained=True)
-alexnet = torch.hub.load('pytorch/vision:v0.10.0', 'alexnet', pretrained=True)
+
+resnet18 = torch.hub.load("pytorch/vision:v0.10.0", "resnet18", pretrained=True)
+mobilenet = torch.hub.load("pytorch/vision:v0.10.0", "mobilenet_v2", pretrained=True)
+alexnet = torch.hub.load("pytorch/vision:v0.10.0", "alexnet", pretrained=True)
 
 print("The size of ResNet-18:")
 count_parameters(resnet18)
@@ -25,4 +44,3 @@ count_parameters(mobilenet)
 
 print("\nThe size of AlexNet:")
 count_parameters(alexnet)
-

@@ -2,8 +2,9 @@
 Base class for trainers.
 """
 
-from abc import ABC, abstractmethod
 import os
+from abc import ABC, abstractmethod
+from typing import Any, Optional
 
 from plato.config import Config
 
@@ -14,10 +15,24 @@ class Trainer(ABC):
     def __init__(self):
         self.device = Config().device()
         self.client_id = 0
+        self.current_round = 0
+        # Subclasses populate the actual model instance during initialization.
+        self.model: Any | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        """Allow dynamic trainer attributes for runtime-extended implementations."""
+        raise AttributeError(f"{type(self).__name__} has no attribute {name!r}.")
 
     def set_client_id(self, client_id):
         """Setting the client ID."""
         self.client_id = client_id
+
+    def require_model(self) -> Any:
+        """Return the model instance, ensuring it is available."""
+        if self.model is None:
+            raise RuntimeError("Trainer model has not been initialised.")
+
+        return self.model
 
     @abstractmethod
     def save_model(self, filename=None, location=None):
@@ -57,7 +72,7 @@ class Trainer(ABC):
         else:
             accuracy_path = f"{model_path}/{model_name}.acc"
 
-        with open(accuracy_path, "r", encoding="utf-8") as file:
+        with open(accuracy_path, encoding="utf-8") as file:
             accuracy = float(file.read())
 
         return accuracy
@@ -67,15 +82,16 @@ class Trainer(ABC):
         if hasattr(Config().trainer, "max_concurrency"):
             model_name = Config().trainer.model_name
             model_path = Config().params["model_path"]
-            model_file = f"{model_path}/{model_name}_{self.client_id}_{Config().params['run_id']}.pth"
+            model_file = f"{model_path}/{model_name}_{self.client_id}_{Config().params['run_id']}.safetensors"
             accuracy_file = f"{model_path}/{model_name}_{self.client_id}_{Config().params['run_id']}.acc"
+            evaluation_file = f"{model_path}/{model_name}_{self.client_id}_{Config().params['run_id']}.eval.pkl"
 
             if os.path.exists(model_file):
                 os.remove(model_file)
-                os.remove(model_file + ".pkl")
-
             if os.path.exists(accuracy_file):
                 os.remove(accuracy_file)
+            if os.path.exists(evaluation_file):
+                os.remove(evaluation_file)
 
     @abstractmethod
     def train(self, trainset, sampler, **kwargs) -> float:

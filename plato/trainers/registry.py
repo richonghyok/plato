@@ -2,49 +2,72 @@
 Having a registry of all available classes is convenient for retrieving an instance
 based on a configuration at run-time.
 """
+
 import logging
 
 from plato.config import Config
+from plato.trainers import (
+    basic,
+    composable,
+    gan,
+    pfedgraph,
+    split_learning,
+)
+from plato.trainers import (
+    lerobot as lerobot_trainer,
+)
+from plato.trainers import (
+    nanochat as nanochat_trainer,
+)
 
-if hasattr(Config().trainer, "use_mindspore"):
-    from plato.trainers.mindspore import basic as basic_mindspore
+registered_trainers = {
+    "composable": composable.ComposableTrainer,
+    "basic": basic.Trainer,
+    "timm_basic": basic.TrainerWithTimmScheduler,
+    "gan": gan.Trainer,
+    "pfedgraph": pfedgraph.Trainer,
+    "split_learning": split_learning.Trainer,
+    "nanochat": nanochat_trainer.Trainer,
+    "lerobot": lerobot_trainer.Trainer,
+}
 
-    registered_trainers = {"basic": basic_mindspore.Trainer}
 
-elif hasattr(Config().trainer, "use_tensorflow"):
-    from plato.trainers.tensorflow import basic as basic_tensorflow
+def _resolve_trainer_name(trainer_config) -> str:
+    """Resolve trainer type supporting framework shortcuts."""
+    trainer_type_attr = getattr(trainer_config, "type", None)
+    trainer_type = trainer_type_attr if isinstance(trainer_type_attr, str) else None
+    framework = getattr(trainer_config, "framework", "")
 
-    registered_trainers = {"basic": basic_tensorflow.Trainer}
-else:
-    from plato.trainers import (
-        basic,
-        diff_privacy,
-        pascal_voc,
-        gan,
-    )
-
-    registered_trainers = {
-        "basic": basic.Trainer,
-        "timm_basic": basic.TrainerWithTimmScheduler,
-        "diff_privacy": diff_privacy.Trainer,
-        "pascal_voc": pascal_voc.Trainer,
-        "gan": gan.Trainer,
-    }
+    if not trainer_type and framework:
+        if framework.lower() == "mlx":
+            return "mlx"
+    if not trainer_type:
+        raise ValueError("Trainer type must be specified in the configuration.")
+    return trainer_type
 
 
 def get(model=None, callbacks=None):
     """Get the trainer with the provided name."""
-    trainer_name = Config().trainer.type
+    config = Config().trainer
+    trainer_name = _resolve_trainer_name(config)
     logging.info("Trainer: %s", trainer_name)
 
-    if Config().trainer.model_name == "yolov5":
-        from plato.trainers import yolov5
+    if trainer_name == "diff_privacy":
+        from plato.trainers import diff_privacy
 
-        return yolov5.Trainer()
-    elif Config().trainer.type == "HuggingFace":
+        return diff_privacy.Trainer(model=model, callbacks=callbacks)
+    elif trainer_name == "HuggingFace":
         from plato.trainers import huggingface
 
         return huggingface.Trainer(model=model, callbacks=callbacks)
+    elif trainer_name == "self_supervised_learning":
+        from plato.trainers import self_supervised_learning
+
+        return self_supervised_learning.Trainer(model=model, callbacks=callbacks)
+    elif trainer_name == "mlx":
+        from plato.trainers import mlx
+
+        return mlx.ComposableMLXTrainer(model=model, callbacks=callbacks)
     elif trainer_name in registered_trainers:
         return registered_trainers[trainer_name](model=model, callbacks=callbacks)
     else:

@@ -1,10 +1,15 @@
 """
-Utility functions for homomorphric encryption with TenSEAL.
+Utility functions for homomorphic encryption with TenSEAL.
 """
+
+from __future__ import annotations
+
 import os
 import pickle
 import zlib
-from typing import OrderedDict
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import tenseal as ts
@@ -18,7 +23,7 @@ def get_ckks_context():
     try:
         with open(os.path.join(context_dir, context_name), "rb") as f:
             return ts.context_from(f.read())
-    except:
+    except FileNotFoundError:
         # Create a new context if it does not exist
         if not os.path.exists(context_dir):
             os.mkdir(context_dir)
@@ -44,7 +49,7 @@ def encrypt_weights(
     indices=None,
 ):
     """Flatten the model weights and encrypt the selected ones."""
-    assert not context is None
+    assert context is not None
 
     # Step 1: flatten all weight tensors to a vector
     weights_vector = np.array([])
@@ -83,7 +88,9 @@ def _encrypt(data_vector, context, serialize=True):
         return ts.ckks_vector(context, data_vector)
 
 
-def deserialize_weights(serialized_weights, context):
+def deserialize_weights(
+    serialized_weights: Mapping[str, Any], context: ts.Context
+) -> OrderedDict:
     """Deserialize the encrypted weights (not decrypted yet)."""
     deserialized_weights = OrderedDict()
     for name, weight in serialized_weights.items():
@@ -97,8 +104,15 @@ def deserialize_weights(serialized_weights, context):
     return deserialized_weights
 
 
-def decrypt_weights(data, weight_shapes=None, para_nums=None):
+def decrypt_weights(
+    data: Mapping[str, Any],
+    weight_shapes: Mapping[str, Any] | None = None,
+    para_nums: Mapping[str, int] | None = None,
+) -> OrderedDict:
     """Decrypt the vector and restore model weights according to the shapes."""
+    if weight_shapes is None or para_nums is None:
+        raise ValueError("weight_shapes and para_nums must be provided for decryption.")
+
     vector_length = []
     for para_num in para_nums.values():
         vector_length.append(para_num)
@@ -125,11 +139,12 @@ def decrypt_weights(data, weight_shapes=None, para_nums=None):
         plaintext_weights_vector, np.cumsum(vector_length)
     )[:-1]
     weight_index = 0
+
     for name, shape in weight_shapes.items():
         decrypted_weights[name] = plaintext_weights_vector[weight_index].reshape(shape)
         try:
             decrypted_weights[name] = torch.from_numpy(decrypted_weights[name])
-        except:
+        except Exception:
             # PyTorch does not exist, just return numpy array and handle it somewhere else.
             decrypted_weights[name] = decrypted_weights[name]
         weight_index = weight_index + 1
@@ -153,6 +168,7 @@ def extract_encrypted_model(data):
     unencrypted_weights = data["unencrypted_weights"]
     encrypted_weights = data["encrypted_weights"]
     indices = data["indices"]
+
     return unencrypted_weights, encrypted_weights, indices
 
 
@@ -167,6 +183,7 @@ def indices_to_bitmap(indices):
 
     # Compress the bitmap before sending it out
     compressed_bitmap = zlib.compress(pickle.dumps(bitmap))
+
     return compressed_bitmap
 
 
@@ -179,4 +196,5 @@ def bitmap_to_indices(bitmap):
     decompressed_bitmap = pickle.loads(zlib.decompress(bitmap))
     bit_array = np.unpackbits(decompressed_bitmap)
     indices = np.where(bit_array == 1)[0].tolist()
+
     return indices

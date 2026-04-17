@@ -5,7 +5,9 @@ Reference:
 
 https://github.com/kuangliu/pytorch-cifar/blob/master/models/resnet.py
 """
+
 import collections
+from typing import Any, cast
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -85,10 +87,10 @@ class Bottleneck(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, block, num_blocks, num_classes=10):
+    def __init__(self, block, num_blocks, num_classes=10, cut_layer=None):
         super().__init__()
 
-        self.in_planes = 64
+        self.in_planes = cast(Any, 64)
 
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
@@ -100,8 +102,8 @@ class Model(nn.Module):
 
         # Preparing named layers so that the model can be split and straddle
         # across the client and the server
-        self.layers = []
-        self.layerdict = collections.OrderedDict()
+        self.layers = cast(Any, [])
+        self.layerdict = cast(Any, collections.OrderedDict())
         self.layerdict["conv1"] = self.conv1
         self.layerdict["bn1"] = self.bn1
         self.layerdict["relu"] = F.relu
@@ -116,6 +118,7 @@ class Model(nn.Module):
         self.layers.append("layer2")
         self.layers.append("layer3")
         self.layers.append("layer4")
+        self.cut_layer = cast(Any, cut_layer)
 
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
@@ -136,17 +139,17 @@ class Model(nn.Module):
         out = self.linear(out)
         return out
 
-    def forward_to(self, x, cut_layer):
+    def forward_to(self, x):
         """Forward pass, but only to the layer specified by cut_layer."""
-        layer_index = self.layers.index(cut_layer)
+        layer_index = self.layers.index(self.cut_layer)
 
         for i in range(0, layer_index + 1):
             x = self.layerdict[self.layers[i]](x)
         return x
 
-    def forward_from(self, x, cut_layer):
+    def forward_from(self, x):
         """Forward pass, starting from the layer specified by cut_layer."""
-        layer_index = self.layers.index(cut_layer)
+        layer_index = self.layers.index(self.cut_layer)
         for i in range(layer_index + 1, len(self.layers)):
             x = self.layerdict[self.layers[i]](x)
 
@@ -164,8 +167,11 @@ class Model(nn.Module):
         )
 
     @staticmethod
-    def get(model_name=None, num_classes=None, **kwargs):
+    def get(model_name=None, num_classes=None, cut_layer=None, **kwargs):
         """Returns a suitable ResNet model according to its type."""
+        if not isinstance(model_name, str):
+            raise ValueError("A valid ResNet model name must be provided.")
+
         if not Model.is_valid_model_type(model_name):
             raise ValueError(f"Invalid Resnet model name: {model_name}")
 
@@ -175,14 +181,14 @@ class Model(nn.Module):
             num_classes = 10
 
         if resnet_type == 18:
-            return Model(BasicBlock, [2, 2, 2, 2], num_classes)
+            return Model(BasicBlock, [2, 2, 2, 2], num_classes, cut_layer)
         elif resnet_type == 34:
-            return Model(BasicBlock, [3, 4, 6, 3], num_classes)
+            return Model(BasicBlock, [3, 4, 6, 3], num_classes, cut_layer)
         elif resnet_type == 50:
-            return Model(Bottleneck, [3, 4, 6, 3], num_classes)
+            return Model(Bottleneck, [3, 4, 6, 3], num_classes, cut_layer)
         elif resnet_type == 101:
-            return Model(Bottleneck, [3, 4, 23, 3], num_classes)
+            return Model(Bottleneck, [3, 4, 23, 3], num_classes, cut_layer)
         elif resnet_type == 152:
-            return Model(Bottleneck, [3, 8, 36, 3], num_classes)
+            return Model(Bottleneck, [3, 8, 36, 3], num_classes, cut_layer)
 
         return None

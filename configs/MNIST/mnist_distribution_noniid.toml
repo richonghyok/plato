@@ -1,0 +1,16 @@
+
+# The training and testing dataset
+datasource = "Torchvision"
+dataset_name = "MNIST"
+download = true
+
+# Number of samples in each partition
+partition_size = 20000
+
+# IID or non-IID?
+sampler = "distribution_noniid"
+client_quantity_concentration = 0.4
+min_partition_size = 50
+
+# The random seed for sampling data
+random_seed = 1

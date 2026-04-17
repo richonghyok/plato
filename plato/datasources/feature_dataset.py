@@ -1,14 +1,34 @@
+from typing import Any
+
 import torch
+from torch.utils.data import Dataset
 
 
-class FeatureDataset(torch.utils.data.Dataset):
+class FeatureDataset(Dataset):
     """Used to prepare a feature dataset for a DataLoader in PyTorch."""
+
     def __init__(self, dataset):
         self.dataset = dataset
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, item):
-        image, label = self.dataset[item]
-        return image, label
+    def __getitem__(self, index):
+        sample = self.dataset[index]
+
+        if isinstance(sample, (list, tuple)):
+            if len(sample) >= 2:
+                feature, label = sample[0], sample[1]
+            elif len(sample) == 1:
+                feature = sample[0]
+                label = torch.tensor(0, dtype=torch.long)
+            else:
+                raise ValueError("Empty sample encountered in FeatureDataset.")
+        else:
+            feature = sample
+            label = torch.tensor(0, dtype=torch.long)
+
+        if torch.is_tensor(label) and label.dim() > 0:
+            label = label.squeeze()
+
+        return feature, label

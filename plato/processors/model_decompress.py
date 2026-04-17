@@ -3,11 +3,13 @@ Implements a Processor for decompressing model weights.
 """
 
 import logging
-from typing import Any
 import pickle
-import zstd
+from typing import Any
 
 from plato.processors import model
+from plato.utils.zstd_helpers import get_zstd
+
+zstd = get_zstd()
 
 
 class Processor(model.Processor):
@@ -25,10 +27,12 @@ class Processor(model.Processor):
 
         if self.client_id is None:
             logging.info(
-                "[Server #%d] Decompressed received model parameters.", self.server_id
+                "[Server #%d] Decompressed received model parameters.",
+                self.server_id,
             )
         else:
             logging.info(
-                "[Client #%d] Decompressed received model parameters.", self.client_id
+                "[Client #%d] Decompressed received model parameters.",
+                self.client_id,
             )
         return output

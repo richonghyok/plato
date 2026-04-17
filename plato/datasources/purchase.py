@@ -1,13 +1,16 @@
 """
 The Purchase100 dataset.
 """
-import os
+
 import logging
-import urllib
+import os
 import tarfile
-import torch
+from urllib import request
+
 import numpy as np
+import torch
 from torch.utils import data
+
 from plato.config import Config
 from plato.datasources import base
 
@@ -30,9 +33,7 @@ class DataSource(base.DataSource):
         """Download the Purchase100 dataset."""
         logging.info("Downloading the Purchase100 dataset...")
         filename = "https://www.comp.nus.edu.sg/~reza/files/dataset_purchase.tgz"
-        urllib.request.urlretrieve(
-            filename, os.path.join(root_path, "tmp_purchase.tgz")
-        )
+        request.urlretrieve(filename, os.path.join(root_path, "tmp_purchase.tgz"))
         logging.info("Dataset downloaded.")
         tar = tarfile.open(os.path.join(root_path, "tmp_purchase.tgz"))
         tar.extractall(path=root_path)

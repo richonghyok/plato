@@ -4,26 +4,43 @@ be customized in Plato and executed in a standalone fashion.
 
 To run this example:
 
-python examples/customized/custom_server.py -c examples/customized/server.yml
+cd examples/customized
+uv run custom_server.py -c server.toml
 """
+
 import logging
+from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 
 import torch
 from torch import nn
 from torchvision.datasets import MNIST
 from torchvision.transforms import ToTensor
 
-from plato.servers import fedavg
+from plato.config import Config
 from plato.datasources import base
-from plato.trainers import basic
+from plato.servers import fedavg
+from plato.trainers.composable import ComposableTrainer
+from plato.trainers.strategies.base import (
+    TestingStrategy,
+    TrainingContext,
+    TrainingStepStrategy,
+)
+from plato.trainers.strategies.loss_criterion import CrossEntropyLossStrategy
+from plato.trainers.strategies.optimizer import AdamOptimizerStrategy
 
 
 class CustomServer(fedavg.Server):
     """A custom federated learning server."""
 
     def __init__(
-        self, model=None, datasource=None, algorithm=None, trainer=None, callbacks=None
+        self,
+        model=None,
+        datasource=None,
+        algorithm=None,
+        trainer=None,
+        callbacks=None,
     ):
         super().__init__(
             model=model,
@@ -41,65 +58,93 @@ class DataSource(base.DataSource):
     def __init__(self):
         super().__init__()
 
-        self.trainset = MNIST("./data", train=True, download=True, transform=ToTensor())
-        self.testset = MNIST("./data", train=False, download=True, transform=ToTensor())
-
-
-class Trainer(basic.Trainer):
-    """A custom trainer with custom training and testing loops."""
-
-    # pylint: disable=unused-argument
-    def train_model(self, config, trainset, sampler, **kwargs):
-        """A custom training loop."""
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3)
-        criterion = nn.CrossEntropyLoss()
-
-        train_loader = torch.utils.data.DataLoader(
-            dataset=trainset,
-            shuffle=False,
-            batch_size=config["batch_size"],
-            sampler=sampler,
+        Config()
+        base_path = Path(Config.params.get("base_path", "./runtime"))
+        data_dir = Path(Config.params.get("data_path", base_path / "data"))
+        self.trainset = MNIST(
+            str(data_dir), train=True, download=True, transform=ToTensor()
+        )
+        self.testset = MNIST(
+            str(data_dir), train=False, download=True, transform=ToTensor()
         )
 
-        num_epochs = 1
-        for __ in range(num_epochs):
-            for examples, labels in train_loader:
-                examples = examples.view(len(examples), -1)
 
-                logits = self.model(examples)
-                loss = criterion(logits, labels)
-                print("train loss: ", loss.item())
+class MNISTTrainingStepStrategy(TrainingStepStrategy):
+    """Custom training step that flattens MNIST images and prints the loss."""
 
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
+    def training_step(
+        self,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        examples: torch.Tensor,
+        labels: torch.Tensor,
+        loss_criterion: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        context: TrainingContext,
+    ) -> torch.Tensor:
+        """Perform a single MNIST training step."""
+        optimizer.zero_grad()
 
-    def test_model(
-        self, config, testset, sampler=None, **kwargs
-    ):  # pylint: disable=unused-argument
-        """A custom testing loop."""
+        flattened_examples = examples.view(examples.size(0), -1)
+        outputs = model(flattened_examples)
+        loss = loss_criterion(outputs, labels)
+
+        loss.backward()
+        optimizer.step()
+
+        print(f"train loss: {loss.item():.6f}")
+
+        return loss
+
+
+class MNISTTestingStrategy(TestingStrategy):
+    """Testing strategy that flattens MNIST images before evaluation."""
+
+    def test_model(self, model, config, testset, sampler, context):
+        """Evaluate the model with flattened MNIST images."""
+        batch_size = config.get("batch_size", 32)
+
+        if sampler is not None and hasattr(sampler, "get") and callable(sampler.get):
+            sampler = sampler.get()
+
         test_loader = torch.utils.data.DataLoader(
-            testset,
-            batch_size=config["batch_size"],
-            sampler=sampler,
-            shuffle=False,
+            testset, batch_size=batch_size, shuffle=False, sampler=sampler
         )
+
+        model.to(context.device)
+        model.eval()
 
         correct = 0
         total = 0
 
         with torch.no_grad():
             for examples, labels in test_loader:
-                examples, labels = examples.to(self.device), labels.to(self.device)
+                examples, labels = (
+                    examples.to(context.device),
+                    labels.to(context.device),
+                )
 
-                examples = examples.view(len(examples), -1)
-                outputs = self.model(examples)
+                flattened_examples = examples.view(examples.size(0), -1)
+                outputs = model(flattened_examples)
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
 
-        accuracy = correct / total
+        accuracy = correct / total if total > 0 else 0.0
         return accuracy
+
+
+class Trainer(ComposableTrainer):
+    """A custom trainer composed with MNIST-specific training and testing strategies."""
+
+    def __init__(self, model=None, callbacks=None):
+        super().__init__(
+            model=model,
+            callbacks=callbacks,
+            loss_strategy=CrossEntropyLossStrategy(),
+            optimizer_strategy=AdamOptimizerStrategy(lr=1e-3),
+            training_step_strategy=MNISTTrainingStepStrategy(),
+            testing_strategy=MNISTTestingStrategy(),
+        )
 
 
 def main():

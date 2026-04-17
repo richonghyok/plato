@@ -2,11 +2,12 @@
 A sampler for orthogonal cross-silo federated learning.
 Each insitution's clients have data of different classes.
 """
+
 import numpy as np
 import torch
-from torch.utils.data import WeightedRandomSampler, SubsetRandomSampler
-from plato.config import Config
+from torch.utils.data import SubsetRandomSampler, WeightedRandomSampler
 
+from plato.config import Config
 from plato.samplers import base
 
 
@@ -69,9 +70,9 @@ class Sampler(base.Sampler):
                 1.0 / len(class_id_list) for i in range(len(class_id_list))
             ]
 
-        target_proportions = [0 for i in range(len(class_list))]
+        target_proportions = [0.0 for i in range(len(class_list))]
         for index, class_id in enumerate(class_id_list):
-            target_proportions[class_id] = class_proportions[index]
+            target_proportions[class_id] = float(class_proportions[index])
         target_proportions = np.asarray(target_proportions)
 
         self.sample_weights = target_proportions[target_list]

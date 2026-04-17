@@ -5,10 +5,13 @@ Reference:
 Y. LeCun, L. Bottou, Y. Bengio, and P. Haffner. "Gradient-based learning applied to
 document recognition." Proceedings of the IEEE, November 1998.
 """
-import collections
 
-from torch import nn
+import collections
+from collections import OrderedDict
+from typing import Any, cast
+
 import torch.nn.functional as F
+from torch import nn
 
 
 class Model(nn.Module):
@@ -19,7 +22,7 @@ class Model(nn.Module):
 
     def __init__(self, num_classes: int = 10, cut_layer=None):
         super().__init__()
-        self.cut_layer = cut_layer
+        self.cut_layer = cast(Any, cut_layer)
 
         # We pad the image to get an input size of 32x32 as for the
         # original network in the LeCun paper
@@ -48,8 +51,8 @@ class Model(nn.Module):
 
         # Preparing named layers so that the model can be split and straddle
         # across the client and the server
-        self.layers = []
-        self.layerdict = collections.OrderedDict()
+        self.layers = cast(Any, [])
+        self.layerdict = cast(Any, collections.OrderedDict())
         self.layerdict["conv1"] = self.conv1
         self.layerdict["relu1"] = self.relu1
         self.layerdict["pool1"] = self.pool1

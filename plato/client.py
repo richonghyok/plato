@@ -5,12 +5,22 @@ Starting point for a Plato federated learning client.
 import asyncio
 import logging
 import os
+from collections.abc import Callable
+from typing import Any, Optional
 
 from plato.clients import registry as client_registry
 from plato.config import Config
 
 
-def run(client_id, port, client=None, edge_server=None, edge_client=None, trainer=None):
+def run(
+    client_id: int,
+    port: int | None,
+    client: Any = None,
+    edge_server: Callable[..., Any] | None = None,
+    edge_client: Callable[..., Any] | None = None,
+    trainer: Callable[[], Any] | None = None,
+    client_kwargs: dict[str, Any] | None = None,
+) -> None:
     """Starting a client to connect to the server."""
     Config().args.id = client_id
     if port is not None:
@@ -34,7 +44,11 @@ def run(client_id, port, client=None, edge_server=None, edge_client=None, traine
                 server = edge_server(trainer=trainer())
             else:
                 server = edge_server()
-            client = edge_client(server)
+            if edge_client is None:
+                raise ValueError(
+                    "edge_client must be provided when edge_server is set."
+                )
+            client = edge_client(server=server)
 
         server.configure()
         client.configure()
@@ -51,11 +65,24 @@ def run(client_id, port, client=None, edge_server=None, edge_client=None, traine
 
     else:
         if client is None:
-            client = client_registry.get()
+            client_kwargs = client_kwargs or {}
+            client = client_registry.get(**client_kwargs)
+
             logging.info("Starting a %s client #%d.", Config().clients.type, client_id)
         else:
             client.client_id = client_id
-            logging.info("Starting a custom client #%d", client_id)
+
+            # Keep the shared context aligned with the explicit client ID.
+            if hasattr(client, "_sync_to_context"):
+                try:
+                    client._sync_to_context(("client_id",))
+                except Exception:
+                    if hasattr(client, "_context"):
+                        client._context.client_id = client_id
+            elif hasattr(client, "_context"):
+                client._context.client_id = client_id
+
+            logging.info("Starting a custom client #%d.", client_id)
 
         client.configure()
 

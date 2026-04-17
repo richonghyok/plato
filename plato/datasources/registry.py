@@ -6,103 +6,75 @@ based on a configuration at run-time.
 import logging
 
 from plato.config import Config
+from plato.datasources import (
+    cinic10,
+    feature,
+    femnist,
+    huggingface,
+    lerobot,
+    lora,
+    nanochat,
+    purchase,
+    texas,
+    tiny_imagenet,
+    torchvision,
+)
 
-if hasattr(Config().trainer, "use_mindspore"):
-    from plato.datasources.mindspore import mnist as mnist_mindspore
+registered_datasources = {
+    "HuggingFace": huggingface,
+    "Torchvision": torchvision,
+    "LoRA": lora,
+    "CINIC10": cinic10,
+    "Purchase": purchase,
+    "Texas": texas,
+    "TinyImageNet": tiny_imagenet,
+    "Feature": feature,
+    "Nanochat": nanochat,
+}
 
-    registered_datasources = {"MNIST": mnist_mindspore}
-    registered_partitioned_datasources = {}
+registered_partitioned_datasources = {"FEMNIST": femnist, "LeRobot": lerobot}
 
-elif hasattr(Config().trainer, "use_tensorflow"):
-    from plato.datasources.tensorflow import (
-        mnist as mnist_tensorflow,
-        fashion_mnist as fashion_mnist_tensorflow,
-    )
-
-    registered_datasources = {
-        "MNIST": mnist_tensorflow,
-        "FashionMNIST": fashion_mnist_tensorflow,
-    }
-
-else:
-    from plato.datasources import (
-        mnist,
-        fashion_mnist,
-        emnist,
-        cifar10,
-        cifar100,
-        cinic10,
-        purchase,
-        texas,
-        huggingface,
-        pascal_voc,
-        tiny_imagenet,
-        femnist,
-        feature,
-        qoenflx,
-        celeba,
-    )
-
-    registered_datasources = {
-        "MNIST": mnist,
-        "FashionMNIST": fashion_mnist,
-        "EMNIST": emnist,
-        "CIFAR10": cifar10,
-        "CIFAR100": cifar100,
-        "CINIC10": cinic10,
-        "Purchase": purchase,
-        "Texas": texas,
-        "HuggingFace": huggingface,
-        "PASCAL_VOC": pascal_voc,
-        "TinyImageNet": tiny_imagenet,
-        "Feature": feature,
-        "QoENFLX": qoenflx,
-        "CelebA": celeba,
-    }
-
-    registered_partitioned_datasources = {"FEMNIST": femnist}
+_datasource_aliases = {
+    "STL10": ("Torchvision", {"dataset_name": "STL10"}),
+    "MNIST": ("Torchvision", {"dataset_name": "MNIST"}),
+    "FashionMNIST": ("Torchvision", {"dataset_name": "FashionMNIST"}),
+    "EMNIST": ("Torchvision", {"dataset_name": "EMNIST"}),
+    "CIFAR10": ("Torchvision", {"dataset_name": "CIFAR10"}),
+    "CIFAR100": ("Torchvision", {"dataset_name": "CIFAR100"}),
+    "CelebA": ("Torchvision", {"dataset_name": "CelebA"}),
+}
 
 
 def get(client_id: int = 0, **kwargs):
     """Get the data source with the provided name."""
-    datasource_name = Config().data.datasource
+    if "datasource_name" in kwargs:
+        datasource_name = kwargs.pop("datasource_name")
+    else:
+        datasource_name = Config().data.datasource
 
-    logging.info("Data source: %s", Config().data.datasource)
-    if datasource_name == "kinetics700":
-        from plato.datasources import kinetics
+    logging.info("Data source: %s", datasource_name)
 
-        return kinetics.DataSource(**kwargs)
+    if datasource_name in _datasource_aliases:
+        target_name, extra_kwargs = _datasource_aliases[datasource_name]
+        kwargs = {**extra_kwargs, **kwargs}
+        datasource_name = target_name
 
-    if datasource_name == "Gym":
-        from plato.datasources import gym
-
-        return gym.DataSource(**kwargs)
-
-    if datasource_name == "Flickr30KE":
-        from plato.datasources import flickr30k_entities
-
-        return flickr30k_entities.DataSource(**kwargs)
-
-    if datasource_name == "ReferItGame":
-        from plato.datasources import referitgame
-
-        return referitgame.DataSource(**kwargs)
-
-    if datasource_name == "COCO":
-        from plato.datasources import coco
-
-        return coco.DataSource(**kwargs)
-
-    if datasource_name == "YOLO":
-        from plato.datasources import yolo
-
-        return yolo.DataSource(**kwargs)
-    elif datasource_name in registered_datasources:
-        dataset = registered_datasources[datasource_name].DataSource(**kwargs)
+    if datasource_name in registered_datasources:
+        module = registered_datasources[datasource_name]
+        datasource_cls = getattr(module, "DataSource", None)
+        if datasource_cls is None:
+            raise AttributeError(
+                f"Registered datasource '{datasource_name}' lacks a DataSource class."
+            )
+        dataset = datasource_cls(**kwargs)
     elif datasource_name in registered_partitioned_datasources:
-        dataset = registered_partitioned_datasources[datasource_name].DataSource(
-            client_id, **kwargs
-        )
+        module = registered_partitioned_datasources[datasource_name]
+        datasource_cls = getattr(module, "DataSource", None)
+        if datasource_cls is None:
+            raise AttributeError(
+                f"Registered partitioned datasource '{datasource_name}' lacks a DataSource class."
+            )
+        dataset = datasource_cls(client_id, **kwargs)
     else:
         raise ValueError(f"No such data source: {datasource_name}")
 
@@ -114,16 +86,26 @@ def get_input_shape():
     datasource_name = Config().data.datasource
 
     logging.info("Data source: %s", Config().data.datasource)
-    if Config().data.datasource == "YOLO":
-        from plato.datasources import yolo
 
-        return yolo.DataSource.input_shape()
-    elif datasource_name in registered_datasources:
-        input_shape = registered_datasources[datasource_name].DataSource.input_shape()
+    if datasource_name in _datasource_aliases:
+        datasource_name = _datasource_aliases[datasource_name][0]
+
+    if datasource_name in registered_datasources:
+        module = registered_datasources[datasource_name]
+        datasource_cls = getattr(module, "DataSource", None)
+        if datasource_cls is None:
+            raise AttributeError(
+                f"Registered datasource '{datasource_name}' lacks a DataSource class."
+            )
+        input_shape = datasource_cls.input_shape()
     elif datasource_name in registered_partitioned_datasources:
-        input_shape = registered_partitioned_datasources[
-            datasource_name
-        ].DataSource.input_shape()
+        module = registered_partitioned_datasources[datasource_name]
+        datasource_cls = getattr(module, "DataSource", None)
+        if datasource_cls is None:
+            raise AttributeError(
+                f"Registered partitioned datasource '{datasource_name}' lacks a DataSource class."
+            )
+        input_shape = datasource_cls.input_shape()
     else:
         raise ValueError(f"No such data source: {datasource_name}")
 

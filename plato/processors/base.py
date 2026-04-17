@@ -2,6 +2,7 @@
 The Processor class is designed for pre-processing data payloads before or after they
 are transmitted over the network between the clients and the servers.
 """
+
 from abc import abstractmethod
 from collections.abc import Iterable
 from typing import Any
@@ -14,7 +15,7 @@ class Processor:
 
     def __init__(self, name=None, trainer=None, **kwargs) -> None:
         """Constructor for Processor."""
-        self.name = name
+        self.name: str = name if isinstance(name, str) else type(self).__name__
         self.trainer = trainer
 
     @abstractmethod

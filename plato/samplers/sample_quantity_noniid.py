@@ -26,8 +26,7 @@ import torch
 from torch.utils.data import SubsetRandomSampler
 
 from plato.config import Config
-from plato.samplers import base
-from plato.samplers import sampler_utils
+from plato.samplers import base, sampler_utils
 
 
 class Sampler(base.Sampler):
@@ -72,7 +71,7 @@ class Sampler(base.Sampler):
             min_partition_size=min_partition_size,
             concentration=concentration,
             num_clients=total_clients,
-        )[client_id]
+        )[client_id - 1]
 
     def sample_quantity_skew(
         self,
@@ -87,7 +86,7 @@ class Sampler(base.Sampler):
             total_size=dataset_size,
             concentration=concentration,
             min_partition_size=min_partition_size,
-            number_partitions=num_clients,
+            number_partitions=num_clients + 1,
             is_extend_total_size=True,
         )
 
@@ -99,7 +98,9 @@ class Sampler(base.Sampler):
         )
 
         # obtain the assigned subdataset indices for current client
-        clients_assigned_idxs = np.split(extended_dataset_indices, proportions_range)
+        clients_assigned_idxs = np.split(extended_dataset_indices, proportions_range)[
+            :-1
+        ]
 
         return clients_assigned_idxs
 

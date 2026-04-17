@@ -17,6 +17,7 @@ handwritten letters," in the 2017 International Joint Conference on Neural
 Networks (IJCNN).
 
 """
+
 import json
 import logging
 import os
@@ -76,14 +77,14 @@ class DataSource(base.DataSource):
             # If we are on the federated learning server
             data_dir = os.path.join(root_path, "test")
             data_url = (
-                "http://iqua.ece.toronto.edu/baochun/FEMNIST/test/"
+                "https://iqua.ece.toronto.edu/baochun/FEMNIST/test/"
                 + str(client_id)
                 + ".zip"
             )
         else:
             data_dir = os.path.join(root_path, "train")
             data_url = (
-                "http://iqua.ece.toronto.edu/baochun/FEMNIST/train/"
+                "https://iqua.ece.toronto.edu/baochun/FEMNIST/train/"
                 + str(client_id)
                 + ".zip"
             )
@@ -123,20 +124,18 @@ class DataSource(base.DataSource):
 
         dataset = CustomDictDataset(loaded_data=loaded_data, transform=train_transform)
 
-        if client_id == 0:  # testing dataset on the server
-            self.testset = dataset
-        else:  # training dataset on one of the clients
-            self.trainset = dataset
+        self.testset = dataset
+        self.trainset = dataset
 
     @staticmethod
     def read_data(file_path):
         """Reading the dataset specific to a client_id."""
-        with open(file_path, "r", encoding="utf-8") as fin:
+        with open(file_path, encoding="utf-8") as fin:
             loaded_data = json.load(fin)
         return loaded_data
 
     def num_train_examples(self):
-        return len(self.trainset)
+        return len(self.require_trainset())
 
     def num_test_examples(self):
-        return len(self.testset)
+        return len(self.require_testset())

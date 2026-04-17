@@ -13,6 +13,7 @@ import sys
 import time
 from abc import abstractmethod
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import socketio
@@ -22,7 +23,14 @@ from plato.callbacks.handler import CallbackHandler
 from plato.callbacks.server import LogProgressCallback
 from plato.client import run
 from plato.config import Config
-from plato.utils import s3, fonts
+from plato.servers.strategies.base import ServerContext
+from plato.servers.strategies.client_selection import RandomSelectionStrategy
+from plato.utils import fonts, s3
+
+if TYPE_CHECKING:
+    from plato.algorithms.base import Algorithm
+    from plato.trainers.base import Trainer
+
 
 # pylint: disable=unused-argument, protected-access
 class ServerEvents(socketio.AsyncNamespace):
@@ -36,7 +44,7 @@ class ServerEvents(socketio.AsyncNamespace):
         """Upon a new connection from a client."""
         logging.info("[Server #%d] A new client just connected.", os.getpid())
 
-    async def on_disconnect(self, sid):
+    async def on_disconnect(self, sid, reason=None):
         """Upon a disconnection event."""
         logging.info("[Server #%d] An existing client just disconnected.", os.getpid())
         await self.plato_server._client_disconnected(sid)
@@ -70,7 +78,7 @@ class ServerEvents(socketio.AsyncNamespace):
 class Server:
     """The base class for federated learning servers."""
 
-    def __init__(self, callbacks=None):
+    def __init__(self, callbacks=None, client_selection_strategy=None):
         self.sio = None
         self.client = None
         self.clients = {}
@@ -78,7 +86,7 @@ class Server:
         # The client ids are stored for client selection
         self.clients_pool = []
         self.clients_per_round = 0
-        self.selected_clients = None
+        self.selected_clients: list[int] = []
         self.selected_client_id = 0
         self.selected_sids = []
         self.current_round = 0
@@ -86,6 +94,7 @@ class Server:
         self.algorithm = None
         self.trainer = None
         self.accuracy = 0
+        self.accuracy_std = 0
         self.reports = {}
         self.updates = []
         self.client_payload = {}
@@ -99,11 +108,26 @@ class Server:
             else True
         )
 
+        self._mpc_round_lock = None
+        if getattr(Config().clients, "type", None) == "mpc" and not hasattr(
+            Config().server, "s3_endpoint_url"
+        ):
+            spawn_context = mp.get_context("spawn")
+            self._mpc_round_lock = spawn_context.Lock()
+
         # Starting from the default server callback class, add all supplied server callbacks
         self.callbacks = [LogProgressCallback]
         if callbacks is not None:
             self.callbacks.extend(callbacks)
         self.callback_handler = CallbackHandler(self.callbacks)
+
+        # Initialize server context for strategies
+        self.context = ServerContext()
+
+        # Initialize client selection strategy (default: random selection)
+        self.client_selection_strategy = (
+            client_selection_strategy or RandomSelectionStrategy()
+        )
 
         # Accumulated communication overhead (MB) throughout the FL training session
         self.comm_overhead = 0
@@ -174,12 +198,48 @@ class Server:
     def __repr__(self):
         return f"Server #{os.getpid()}"
 
+    def __getattr__(self, name: str) -> Any:
+        """Allow subclasses to inject dynamic attributes at runtime."""
+        raise AttributeError(f"{type(self).__name__} has no attribute {name!r}.")
+
+    def _require_sio(self) -> socketio.AsyncServer:
+        """Return the socket.io server, ensuring it is configured."""
+        if self.sio is None:
+            raise RuntimeError(
+                "Socket.IO server has not been initialised for this server instance."
+            )
+        return self.sio
+
+    def require_trainer(self) -> "Trainer":
+        """Return the trainer instance, ensuring it is available."""
+        if self.trainer is None:
+            raise RuntimeError(
+                "Trainer has not been initialised on the server; "
+                "call `init_trainer` before continuing."
+            )
+        return self.trainer
+
+    def require_algorithm(self) -> "Algorithm":
+        """Return the algorithm instance, ensuring it is available."""
+        if self.algorithm is None:
+            raise RuntimeError(
+                "Algorithm has not been initialised on the server; "
+                "call `get_algorithm` before continuing."
+            )
+        return self.algorithm
+
+    def require_datasource(self) -> Any:
+        """Return the datasource instance, ensuring it is available."""
+        if self.datasource is None:
+            raise RuntimeError("Datasource has not been initialised on the server.")
+        return self.datasource
+
     def __str__(self):
         return f"Server #{os.getpid()}"
 
     def configure(self) -> None:
         """Initializes configuration settings based on the configuration file."""
-        logging.info("[Server #%d] Configuring the server...", os.getpid())
+        logging.info("[%s] Configuring the server...", self)
 
         # Ping interval and timeout setup for the server
         self.ping_interval = (
@@ -256,6 +316,15 @@ class Server:
         else:
             self.uplink_bandwidth = self.uplink_bandwidth / self.clients_per_round
 
+        # Setup server context for strategies
+        self.context.server = self
+        self.context.total_clients = self.total_clients
+        self.context.clients_per_round = self.clients_per_round
+        self.context.state["prng_state"] = self.prng_state
+
+        # Setup client selection strategy
+        self.client_selection_strategy.setup(self.context)
+
     def run(self, client=None, edge_server=None, edge_client=None, trainer=None):
         """Starts a run loop for the server."""
         self.client = client
@@ -263,6 +332,15 @@ class Server:
 
         if Config().args.resume:
             self._resume_from_checkpoint()
+
+        client_kwargs = None
+        if getattr(Config().clients, "type", None) == "mpc":
+            client_kwargs = {
+                "round_store_lock": self._mpc_round_lock,
+                "debug_artifacts": getattr(
+                    Config().clients, "mpc_debug_artifacts", False
+                ),
+            }
 
         if Config().is_central_server():
             # Start the edge servers as clients of the central server first
@@ -274,6 +352,7 @@ class Server:
                 edge_server=edge_server,
                 edge_client=edge_client,
                 trainer=trainer,
+                client_kwargs=client_kwargs,
             )
 
             asyncio.get_event_loop().create_task(self._periodic(self.periodic_interval))
@@ -288,7 +367,7 @@ class Server:
             if self.disable_clients:
                 logging.info("No clients are launched (server:disable_clients = true)")
             else:
-                Server._start_clients(client=self.client)
+                Server._start_clients(client=self.client, client_kwargs=client_kwargs)
 
             asyncio.get_event_loop().create_task(self._periodic(self.periodic_interval))
 
@@ -318,10 +397,14 @@ class Server:
         if hasattr(Config().server, "s3_endpoint_url"):
             self.s3_client = s3.S3()
 
-        app = web.Application()
+        web_module = cast(Any, web)
+        app = web_module.Application()
         self.sio.attach(app)
-        web.run_app(
-            app, host=Config().server.address, port=port, loop=asyncio.get_event_loop()
+        web_module.run_app(
+            app,
+            host=Config().server.address,
+            port=port,
+            loop=asyncio.get_event_loop(),
         )
 
     async def register_client(self, sid, client_process_id, client_id):
@@ -356,7 +439,12 @@ class Server:
 
     @staticmethod
     def _start_clients(
-        client=None, as_server=False, edge_server=None, edge_client=None, trainer=None
+        client=None,
+        as_server=False,
+        edge_server=None,
+        edge_client=None,
+        trainer=None,
+        client_kwargs=None,
     ):
         """Starts all the clients as separate processes."""
         starting_id = 1
@@ -395,17 +483,36 @@ class Server:
             if as_server:
                 port = int(Config().server.port) + client_id
                 logging.info(
-                    "Starting client #%d as an edge server on port %s.", client_id, port
+                    "Starting client #%d as an edge server on port %s.",
+                    client_id,
+                    port,
                 )
                 proc = mp.Process(
                     target=run,
-                    args=(client_id, port, client, edge_server, edge_client, trainer),
+                    args=(
+                        client_id,
+                        port,
+                        client,
+                        edge_server,
+                        edge_client,
+                        trainer,
+                        client_kwargs,
+                    ),
                 )
                 proc.start()
             else:
                 logging.info("Starting client #%d's process.", client_id)
                 proc = mp.Process(
-                    target=run, args=(client_id, None, client, None, None, None)
+                    target=run,
+                    args=(
+                        client_id,
+                        None,
+                        client,
+                        None,
+                        None,
+                        None,
+                        client_kwargs,
+                    ),
                 )
                 proc.start()
 
@@ -413,7 +520,7 @@ class Server:
         """Closes all socket.io connections after training completes."""
         for client_id, client in dict(self.clients).items():
             logging.info("Closing the connection to client #%d.", client_id)
-            await self.sio.emit("disconnect", room=client["sid"])
+            await self._require_sio().emit("disconnect", room=client["sid"])
 
     async def _select_clients(self, for_next_batch=False):
         """Selects a subset of the clients and send messages to them to start training."""
@@ -445,11 +552,11 @@ class Server:
             # server has aggregated all reporting clients already
             if (
                 self.asynchronous_mode
-                and self.selected_clients is not None
+                and self.selected_clients
                 and len(self.reported_clients) > 0
                 and len(self.reported_clients) < self.clients_per_round
             ):
-                # If self.selected_clients is None, it implies that it is the first iteration;
+                # If there are no previously selected clients, it implies that it is the first iteration;
                 # If len(self.reported_clients) == self.clients_per_round, it implies that
                 # all selected clients have already reported.
 
@@ -499,7 +606,7 @@ class Server:
             if not self.simulate_wall_time:
                 self.reported_clients = []
 
-        if len(self.selected_clients) > 0:
+        if self.selected_clients:
             self.selected_sids = []
 
             # If max_concurrency is specified, run selected clients batch by batch,
@@ -590,7 +697,8 @@ class Server:
                     server_response, client_id=self.selected_client_id
                 )
 
-                payload = self.algorithm.extract_weights()
+                algorithm = self.require_algorithm()
+                payload = algorithm.extract_weights()
                 payload = self.customize_server_payload(payload)
 
                 if self.comm_simulation:
@@ -601,17 +709,21 @@ class Server:
                     )
 
                     # First apply outbound processors, if any
-                    payload = self.outbound_processor.process(payload)
+                    if self.outbound_processor is not None:
+                        payload = self.outbound_processor.process(payload)
 
                     model_name = (
                         Config().trainer.model_name
                         if hasattr(Config().trainer, "model_name")
                         else "custom"
                     )
+                    if "/" in model_name:
+                        model_name = model_name.replace("/", "_")
+
                     checkpoint_path = Config().params["checkpoint_path"]
 
                     payload_filename = (
-                        f"{checkpoint_path}/{model_name}_{self.selected_client_id}.pth"
+                        f"{checkpoint_path}/{model_name}_{self.selected_client_id}.pkl"
                     )
 
                     with open(payload_filename, "wb") as payload_file:
@@ -636,7 +748,7 @@ class Server:
                     )
 
                 # Send the server response as metadata to the clients (payload to follow)
-                await self.sio.emit(
+                await self._require_sio().emit(
                     "payload_to_arrive", {"response": server_response}, room=sid
                 )
 
@@ -656,15 +768,34 @@ class Server:
             )
 
     def choose_clients(self, clients_pool, clients_count):
-        """Chooses a subset of the clients to participate in each round."""
+        """Chooses a subset of clients to participate in each round."""
         assert clients_count <= len(clients_pool)
-        random.setstate(self.prng_state)
 
-        # Select clients randomly
-        selected_clients = random.sample(clients_pool, clients_count)
+        if type(self).choose_clients is not Server.choose_clients:
+            raise RuntimeError(
+                "Custom choose_clients overrides should use the strategy API."
+                " Please update the subclass to call `_select_clients_with_strategy`."
+            )
 
-        self.prng_state = random.getstate()
-        logging.info("[%s] Selected clients: %s", self, selected_clients)
+        return self._select_clients_with_strategy(clients_pool, clients_count)
+
+    def _select_clients_with_strategy(self, clients_pool, clients_count):
+        """Delegate client selection to the configured strategy."""
+        self.context.current_round = self.current_round
+        self.context.state["prng_state"] = self.prng_state
+
+        selected_clients = self.client_selection_strategy.select_clients(
+            clients_pool, clients_count, self.context
+        )
+
+        # Update PRNG state from context
+        self.prng_state = self.context.state["prng_state"]
+
+        # Call strategy hook
+        self.client_selection_strategy.on_clients_selected(
+            selected_clients, self.context
+        )
+
         return selected_clients
 
     async def _periodic(self, periodic_interval):
@@ -677,7 +808,8 @@ class Server:
 
     async def _periodic_task(self):
         """A periodic task that is executed from time to time, determined by
-        'server:periodic_interval' with a default value of 5 seconds, in the configuration."""
+        'server:periodic_interval' with a default value of 5 seconds, in the configuration.
+        """
         # Call the async function that defines a customized periodic task, if any
         await self.periodic_task()
 
@@ -721,18 +853,19 @@ class Server:
 
     async def _send_in_chunks(self, data, sid, client_id) -> None:
         """Sends a bytes object in fixed-sized chunks to the client."""
-        step = 1024 ^ 2
+        step = 1024**2
         chunks = [data[i : i + step] for i in range(0, len(data), step)]
 
         for chunk in chunks:
-            await self.sio.emit("chunk", {"data": chunk}, room=sid)
+            await self._require_sio().emit("chunk", {"data": chunk}, room=sid)
 
-        await self.sio.emit("payload", {"id": client_id}, room=sid)
+        await self._require_sio().emit("payload", {"id": client_id}, room=sid)
 
     async def _send(self, sid, payload, client_id) -> None:
         """Sends a new data payload to the client using either S3 or socket.io."""
         # First apply outbound processors, if any
-        payload = self.outbound_processor.process(payload)
+        if self.outbound_processor is not None:
+            payload = self.outbound_processor.process(payload)
 
         metadata = {"id": client_id}
 
@@ -755,7 +888,7 @@ class Server:
                 await self._send_in_chunks(_data, sid, client_id)
                 data_size = sys.getsizeof(_data)
 
-        await self.sio.emit("payload_done", metadata, room=sid)
+        await self._require_sio().emit("payload_done", metadata, room=sid)
 
         logging.info(
             "[%s] Sent %.2f MB of payload data to client #%d.",
@@ -778,8 +911,10 @@ class Server:
                 if hasattr(Config().trainer, "model_name")
                 else "custom"
             )
+            if "/" in model_name:
+                model_name = model_name.replace("/", "_")
             checkpoint_path = Config().params["checkpoint_path"]
-            payload_filename = f"{checkpoint_path}/{model_name}_client_{client_id}.pth"
+            payload_filename = f"{checkpoint_path}/{model_name}_client_{client_id}.pkl"
             with open(payload_filename, "rb") as payload_file:
                 self.client_payload[sid] = pickle.load(payload_file)
 
@@ -834,7 +969,16 @@ class Server:
             else:
                 payload_size = sys.getsizeof(pickle.dumps(self.client_payload[sid]))
         else:
-            self.client_payload[sid] = self.s3_client.receive_from_s3(s3_key)
+            if self.s3_client is None:
+                raise RuntimeError(
+                    "S3 client is not configured but an S3 payload key was received."
+                )
+            receive_from_s3 = getattr(self.s3_client, "receive_from_s3", None)
+            if not callable(receive_from_s3):
+                raise RuntimeError(
+                    "Configured S3 client does not support receive_from_s3()."
+                )
+            self.client_payload[sid] = receive_from_s3(s3_key)
             payload_size = sys.getsizeof(pickle.dumps(self.client_payload[sid]))
 
         logging.info(
@@ -851,9 +995,10 @@ class Server:
     async def process_client_info(self, client_id, sid):
         """Processes the received metadata information from a reporting client."""
         # First pass through the inbound_processor(s), if any
-        self.client_payload[sid] = self.inbound_processor.process(
-            self.client_payload[sid]
-        )
+        if self.inbound_processor is not None:
+            self.client_payload[sid] = self.inbound_processor.process(
+                self.client_payload[sid]
+            )
 
         if self.comm_simulation:
             if (
@@ -875,7 +1020,10 @@ class Server:
 
         start_time = self.training_clients[client_id]["start_time"]
         finish_time = (
-            self.reports[sid].training_time + self.reports[sid].comm_time + start_time
+            self.reports[sid].training_time
+            + self.reports[sid].processing_time
+            + self.reports[sid].comm_time
+            + start_time
         )
         starting_round = self.training_clients[client_id]["starting_round"]
 
@@ -977,7 +1125,7 @@ class Server:
 
                         self.training_sids.append(sid)
 
-                        await self.sio.emit(
+                        await self._require_sio().emit(
                             "request_update",
                             {
                                 "client_id": client_id,
@@ -1108,7 +1256,9 @@ class Server:
             self.wall_time = max(client_finish_time, self.wall_time)
 
             logging.info(
-                "[%s] Advancing the wall clock time to %.2f.", self, self.wall_time
+                "[%s] Advancing the wall clock time to %.2f.",
+                self,
+                self.wall_time,
             )
 
         # If all updates have been received from selected clients, the aggregation process
@@ -1183,9 +1333,9 @@ class Server:
                         untrained_client_index = len(self.trained_clients)
 
                         # Swap current client to the begining of untrained clients
-                        self.selected_clients[
-                            fail_client_index
-                        ] = self.selected_clients[untrained_client_index]
+                        self.selected_clients[fail_client_index] = (
+                            self.selected_clients[untrained_client_index]
+                        )
                         self.selected_clients[untrained_client_index] = client_id
 
                         # Start next batch of client selection if current batch is done
@@ -1211,11 +1361,17 @@ class Server:
             if hasattr(Config().trainer, "model_name")
             else "custom"
         )
-        filename = f"checkpoint_{model_name}_{self.current_round}.pth"
+        if "/" in model_name:
+            model_name = model_name.replace("/", "_")
+        filename = f"checkpoint_{model_name}_{self.current_round}.safetensors"
         logging.info(
-            "[%s] Saving the checkpoint to %s/%s.", self, checkpoint_path, filename
+            "[%s] Saving the checkpoint to %s/%s.",
+            self,
+            checkpoint_path,
+            filename,
         )
-        self.trainer.save_model(filename, checkpoint_path)
+        trainer = self.require_trainer()
+        trainer.save_model(filename, checkpoint_path)
         self._save_random_states(self.current_round, checkpoint_path)
 
         # Saving the current round in the server for resuming its session later on
@@ -1225,7 +1381,8 @@ class Server:
     def _resume_from_checkpoint(self):
         """Resumes a training session from a previously saved checkpoint."""
         logging.info(
-            "[%s] Resume a training session from a previously saved checkpoint.", self
+            "[%s] Resume a training session from a previously saved checkpoint.",
+            self,
         )
 
         # Loading important data in the server for resuming its session
@@ -1242,8 +1399,9 @@ class Server:
             if hasattr(Config().trainer, "model_name")
             else "custom"
         )
-        filename = f"checkpoint_{model_name}_{self.current_round}.pth"
-        self.trainer.load_model(filename, checkpoint_path)
+        filename = f"checkpoint_{model_name}_{self.current_round}.safetensors"
+        trainer = self.require_trainer()
+        trainer.load_model(filename, checkpoint_path)
 
     def _save_random_states(self, round_to_save, checkpoint_path):
         """Saves the random states in the server for resuming its session later on."""
@@ -1308,7 +1466,8 @@ class Server:
     async def _close(self):
         """Closes the server."""
         logging.info("[%s] Training concluded.", self)
-        self.trainer.save_model()
+        trainer = self.require_trainer()
+        trainer.save_model()
 
         self.server_will_close()
         self.callback_handler.call_event("on_server_will_close", self)
@@ -1352,7 +1511,15 @@ class Server:
             if self.disable_clients:
                 logging.info("No clients are launched (server:disable_clients = true)")
             else:
-                Server._start_clients(client=self.client)
+                client_kwargs = None
+                if getattr(Config().clients, "type", None) == "mpc":
+                    client_kwargs = {
+                        "round_store_lock": self._mpc_round_lock,
+                        "debug_artifacts": getattr(
+                            Config().clients, "mpc_debug_artifacts", False
+                        ),
+                    }
+                Server._start_clients(client=self.client, client_kwargs=client_kwargs)
 
     def server_will_close(self) -> None:
         """

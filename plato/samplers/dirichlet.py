@@ -1,11 +1,12 @@
 """
 Samples data from a dataset, biased across labels according to the Dirichlet distribution.
 """
+
 import numpy as np
 import torch
-from torch.utils.data import WeightedRandomSampler, SubsetRandomSampler
-from plato.config import Config
+from torch.utils.data import SubsetRandomSampler, WeightedRandomSampler
 
+from plato.config import Config
 from plato.samplers import base
 
 
@@ -27,7 +28,16 @@ class Sampler(base.Sampler):
         )
 
         if testing:
-            target_list = datasource.get_test_set().targets
+            testset = datasource.get_test_set()
+            if testset is None:
+                raise RuntimeError(
+                    "Dirichlet sampler requires a test dataset when testing is True."
+                )
+            target_list = getattr(testset, "targets", None)
+            if target_list is None:
+                raise AttributeError(
+                    "Test dataset returned by datasource must expose a 'targets' attribute."
+                )
         else:
             # The list of labels (targets) for all the examples
             target_list = datasource.targets()
@@ -42,7 +52,10 @@ class Sampler(base.Sampler):
             target_proportions = np.repeat(0, len(class_list))
             target_proportions[np.random.randint(0, len(class_list))] = 1
 
-        self.sample_weights = target_proportions[target_list]
+        weights = target_proportions[target_list]
+        if hasattr(weights, "tolist"):
+            weights = weights.tolist()
+        self.sample_weights = list(weights)
 
     def num_samples(self) -> int:
         """Returns the length of the dataset after sampling."""

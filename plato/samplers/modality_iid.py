@@ -6,6 +6,7 @@ Samples data from a dataset, biased across modalities in an
 
     There is no difference between the train sampler and test sampler.
 """
+
 import numpy as np
 
 from plato.samplers import base
@@ -13,8 +14,9 @@ from plato.samplers import base
 
 class Sampler(base.Sampler):
     """Create a data sampler for each client to use a randomly divided partition of the
-        dataset."""
-    def __init__(self, datasource, client_id):
+    dataset."""
+
+    def __init__(self, datasource, client_id, testing=False):
         super().__init__()
 
         self.client_id = client_id
@@ -30,11 +32,11 @@ class Sampler(base.Sampler):
 
     def get(self):
         """Obtains the modality sampler.
-            Note: the sampler here is utilized as the mask to
-             remove modalities.
+        Note: the sampler here is utilized as the mask to
+         remove modalities.
         """
         return self.subset_modalities
 
     def modality_size(self):
-        """ Obtain the utilized modality size """
+        """Obtain the utilized modality size"""
         return len(self.subset_modalities)

@@ -1,21 +1,27 @@
 """
-Implements a generalized Processor for applying operations onto MistNet PyTorch features.
+Implements a generalized Processor for applying operations onto PyTorch features.
 """
-from typing import Any, Callable
+
+from collections.abc import Callable
+from typing import Any
 
 import torch
+
 from plato.processors import base
 
 
 class Processor(base.Processor):
     """
-    Implements a generalized Processor for applying operations onto MistNet PyTorch features.
+    Implements a generalized Processor for applying operations onto PyTorch features.
     """
-    def __init__(self,
-                 method: Callable = lambda x, y: (x, y),
-                 client_id=None,
-                 use_numpy=True,
-                 **kwargs) -> None:
+
+    def __init__(
+        self,
+        method: Callable = lambda x, y: (x, y),
+        client_id=None,
+        use_numpy=True,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
 
         self.client_id = client_id
@@ -24,10 +30,12 @@ class Processor(base.Processor):
 
     def process(self, data: Any) -> Any:
         """
-        Implements a generalized Processor for applying operations onto MistNet PyTorch features.
+        Implements a generalized Processor for applying operations onto PyTorch features.
         """
 
         output = []
+        trainer = getattr(self, "trainer", None)
+        device = getattr(trainer, "device", "cpu") if trainer is not None else "cpu"
 
         for logits, targets in data:
             if self.use_numpy:
@@ -36,10 +44,10 @@ class Processor(base.Processor):
             logits, targets = self.method(logits, targets)
 
             if self.use_numpy:
-                if self.trainer.device != 'cpu':
-                    logits = torch.from_numpy(logits.astype('float16'))
+                if device != "cpu":
+                    logits = torch.from_numpy(logits.astype("float16"))
                 else:
-                    logits = torch.from_numpy(logits.astype('float32'))
+                    logits = torch.from_numpy(logits.astype("float32"))
 
             output.append((logits, targets))
 

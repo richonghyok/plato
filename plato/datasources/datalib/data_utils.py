@@ -2,32 +2,39 @@
 Useful tools for processing the data
 
 """
-import shutil
-import os
+
 import json
+import os
+import shutil
+
 import numpy as np
 
 
+def _asdict_if_available(value):
+    """Return a dict from namedtuple-like objects when `_asdict` exists."""
+    asdict_fn = getattr(value, "_asdict", None)
+    if callable(asdict_fn):
+        return asdict_fn()
+    return None
+
+
 def config_to_dict(plato_config):
-    """ Convert the plato config (can be nested one) instance to the dict. """
+    """Convert the plato config (can be nested one) instance to the dict."""
     # convert the whole to dict - OrderedDict
     plato_config_dict = plato_config._asdict()
 
     def to_dict(elem):
-
         for key, value in elem.items():
-            try:
-                value = value._asdict()
+            value_dict = _asdict_if_available(value)
+            if value_dict is not None:
+                value = value_dict
                 elem[key] = to_dict(value)
-            except:
-                pass
             if isinstance(value, list):
                 for idx, value_item in enumerate(value):
-                    try:
-                        value_item = value_item._asdict()
+                    value_item_dict = _asdict_if_available(value_item)
+                    if value_item_dict is not None:
+                        value_item = value_item_dict
                         value[idx] = to_dict(value_item)
-                    except:
-                        pass
                 elem[key] = value
         return elem
 
@@ -37,7 +44,7 @@ def config_to_dict(plato_config):
 
 
 def dict_list2tuple(dict_obj):
-    """ Convert all list element in the dict to tuple """
+    """Convert all list element in the dict to tuple"""
     for key, value in dict_obj.items():
         if isinstance(value, dict):
             for inner_key, inner_v in value.items():
@@ -63,7 +70,7 @@ def dict_list2tuple(dict_obj):
 
 
 def phrase_boxes_alignment(flatten_boxes, ori_phrases_boxes):
-    """ Align the phase and its corresponding boxes """
+    """Align the phase and its corresponding boxes"""
     phrases_boxes = list()
 
     ori_pb_boxes_count = list()
@@ -89,21 +96,20 @@ def phrase_boxes_alignment(flatten_boxes, ori_phrases_boxes):
 
 
 def list_inorder(listed_files, flag_str):
-    """" List the files in order based on the file name """
+    """ " List the files in order based on the file name"""
     filtered_listed_files = [fn for fn in listed_files if flag_str in fn]
-    listed_files = sorted(filtered_listed_files,
-                          key=lambda x: x.strip().split(".")[0])
+    listed_files = sorted(filtered_listed_files, key=lambda x: x.strip().split(".")[0])
     return listed_files
 
 
 def copy_files(src_files, dst_dir):
-    """ copy files from src to dst """
+    """copy files from src to dst"""
     for file in src_files:
         shutil.copy(file, dst_dir)
 
 
 def union_shuffled_lists(src_lists):
-    """ shuffle the lists """
+    """shuffle the lists"""
     for i in range(1, len(src_lists)):
         assert len(src_lists[i]) == len(src_lists[i - 1])
     processed = np.random.permutation(len(src_lists[0]))
@@ -112,15 +118,14 @@ def union_shuffled_lists(src_lists):
 
 
 def read_anno_file(anno_file_path):
-
     _, tail = os.path.split(anno_file_path)
     file_type = tail.split(".")[-1]
 
     if file_type == "json":
-        with open(anno_file_path, 'r') as anno_file:
+        with open(anno_file_path) as anno_file:
             annos_list = json.load(anno_file)
     else:
-        with open(anno_file_path, 'r') as anno_file:
+        with open(anno_file_path) as anno_file:
             annos_list = anno_file.readlines()
 
     return annos_list

@@ -2,16 +2,20 @@
 Base class for data sources, encapsulating training and testing datasets with
 custom augmentations and transforms already accommodated.
 """
+
+import contextlib
 import gzip
 import logging
 import os
 import sys
 import tarfile
+import time
 import zipfile
+from pathlib import Path
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import requests
-from plato.config import Config
 
 
 class DataSource:
@@ -19,98 +23,198 @@ class DataSource:
     Training and testing datasets with custom augmentations and transforms
     already accommodated.
     """
+
     def __init__(self):
-        self.trainset = None
-        self.testset = None
+        self.trainset: Any | None = None
+        self.testset: Any | None = None
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _download_guard(data_path: str):
+        """Serialise dataset downloads to avoid concurrent corruption."""
+        os.makedirs(data_path, exist_ok=True)
+        lock_file = os.path.join(data_path, ".download.lock")
+        lock_fd = None
+        waited = False
+
+        try:
+            while True:
+                try:
+                    lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                    break
+                except FileExistsError:
+                    if not waited:
+                        logging.info(
+                            "Another process is preparing the dataset at %s. Waiting.",
+                            data_path,
+                        )
+                        waited = True
+                    time.sleep(1)
+            yield
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
+                try:
+                    os.remove(lock_file)
+                except FileNotFoundError:
+                    pass
 
     @staticmethod
     def download(url, data_path):
-        """downloads a dataset from a URL."""
-        if not os.path.exists(data_path):
-            if Config().clients.total_clients > 1:
-                if not hasattr(Config().data, 'concurrent_download'
-                               ) or not Config().data.concurrent_download:
-                    raise ValueError(
-                        "The dataset has not yet been downloaded from the Internet. "
-                        "Please re-run with '-d' or '--download' first. ")
-
-            os.makedirs(data_path, exist_ok=True)
-
+        """Download a dataset from a URL if it is not already available."""
         url_parse = urlparse(url)
-        file_name = os.path.join(data_path, url_parse.path.split('/')[-1])
+        file_name = os.path.join(data_path, url_parse.path.split("/")[-1])
+        os.makedirs(data_path, exist_ok=True)
+        sentinel = Path(f"{file_name}.complete")
 
-        if not os.path.exists(file_name.replace('.gz', '')):
-            logging.info("Downloading %s.", url)
+        if sentinel.exists():
+            return
 
-            res = requests.get(url, stream=True)
-            total_size = int(res.headers["Content-Length"])
-            downloaded_size = 0
+        with DataSource._download_guard(data_path):
+            if sentinel.exists():
+                return
 
-            with open(file_name, "wb+") as file:
-                for chunk in res.iter_content(chunk_size=1024):
-                    downloaded_size += len(chunk)
-                    file.write(chunk)
-                    file.flush()
-                    sys.stdout.write("\r{:.1f}%".format(100 * downloaded_size /
-                                                        total_size))
-                    sys.stdout.flush()
-                sys.stdout.write("\n")
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                if attempt == 1:
+                    logging.info("Downloading %s.", url)
+                else:
+                    logging.info(
+                        "Retrying download (%s/%s) for %s.",
+                        attempt,
+                        max_attempts,
+                        url,
+                    )
 
-            # Unzip the compressed file just downloaded
-            logging.info("Decompressing the dataset downloaded.")
-            name, suffix = os.path.splitext(file_name)
+                try:
+                    res = requests.get(url, stream=True, timeout=60)
+                    res.raise_for_status()
+                except requests.RequestException as exc:
+                    logging.warning("Download failed for %s: %s", url, exc)
+                    if attempt == max_attempts:
+                        raise
+                    time.sleep(1)
+                    continue
 
-            if file_name.endswith("tar.gz"):
-                tar = tarfile.open(file_name, "r:gz")
-                tar.extractall(data_path)
-                tar.close()
-                os.remove(file_name)
-            elif suffix == '.zip':
-                logging.info("Extracting %s to %s.", file_name, data_path)
-                with zipfile.ZipFile(file_name, 'r') as zip_ref:
-                    zip_ref.extractall(data_path)
-            elif suffix == '.gz':
-                unzipped_file = open(name, 'wb')
-                zipped_file = gzip.GzipFile(file_name)
-                unzipped_file.write(zipped_file.read())
-                zipped_file.close()
-                os.remove(file_name)
-            else:
-                logging.info("Unknown compressed file type.")
-                sys.exit()
+                total_size = int(res.headers.get("Content-Length", 0))
+                downloaded_size = 0
 
-        if Config().args.download:
-            logging.info("The dataset has been successfully downloaded. "
-                         "Re-run the experiment without '-d' or '--download'.")
-            sys.exit()
+                with open(file_name, "wb+") as file:
+                    for chunk in res.iter_content(chunk_size=1024):
+                        if not chunk:
+                            continue
+                        downloaded_size += len(chunk)
+                        file.write(chunk)
+                        file.flush()
+                        if total_size:
+                            sys.stdout.write(
+                                f"\r{100 * downloaded_size / total_size:.1f}%"
+                            )
+                            sys.stdout.flush()
+                    if total_size:
+                        sys.stdout.write("\n")
+
+                if total_size and downloaded_size != total_size:
+                    logging.warning(
+                        "Download size mismatch for %s (expected %s, got %s).",
+                        file_name,
+                        total_size,
+                        downloaded_size,
+                    )
+                    if os.path.exists(file_name):
+                        os.remove(file_name)
+                    if attempt == max_attempts:
+                        raise RuntimeError(
+                            f"Incomplete download for {url}. Please retry."
+                        )
+                    time.sleep(1)
+                    continue
+
+                # Unzip the compressed file just downloaded
+                logging.info("Decompressing the dataset downloaded.")
+                name, suffix = os.path.splitext(file_name)
+
+                try:
+                    if file_name.endswith("tar.gz"):
+                        with tarfile.open(file_name, "r:gz") as tar:
+                            tar.extractall(data_path)
+                        os.remove(file_name)
+                    elif suffix == ".zip":
+                        logging.info("Extracting %s to %s.", file_name, data_path)
+                        with zipfile.ZipFile(file_name, "r") as zip_ref:
+                            zip_ref.extractall(data_path)
+                    elif suffix == ".gz":
+                        with gzip.open(file_name, "rb") as zipped_file:
+                            with open(name, "wb") as unzipped_file:
+                                unzipped_file.write(zipped_file.read())
+                        os.remove(file_name)
+                    else:
+                        logging.info("Unknown compressed file type for %s.", file_name)
+                        sys.exit()
+                except (OSError, tarfile.ReadError, zipfile.BadZipFile) as exc:
+                    logging.warning("Failed to extract %s: %s", file_name, exc)
+                    if os.path.exists(file_name):
+                        os.remove(file_name)
+                    if attempt == max_attempts:
+                        raise
+                    time.sleep(1)
+                    continue
+
+                sentinel.touch()
+                break
 
     @staticmethod
     def input_shape():
-        """ Obtains the input shape of this data source. """
-        raise NotImplementedError(
-            "Input shape not specified for this data source.")
+        """Obtains the input shape of this data source."""
+        raise NotImplementedError("Input shape not specified for this data source.")
 
     def num_train_examples(self) -> int:
-        """ Obtains the number of training examples. """
-        return len(self.trainset)
+        """Obtains the number of training examples."""
+        trainset = self.require_trainset()
+        return len(trainset)
 
     def num_test_examples(self) -> int:
-        """ Obtains the number of testing examples. """
-        return len(self.testset)
+        """Obtains the number of testing examples."""
+        testset = self.require_testset()
+        return len(testset)
 
     def classes(self):
-        """ Obtains a list of class names in the dataset. """
-        return list(self.trainset.classes)
+        """Obtains a list of class names in the dataset."""
+        trainset = self.require_trainset()
+        classes = getattr(trainset, "classes", None)
+        if classes is None:
+            raise AttributeError(
+                "Training dataset does not expose `classes` attribute."
+            )
+        return list(classes)
 
     def targets(self):
-        """ Obtains a list of targets (labels) for all the examples
-        in the dataset. """
-        return self.trainset.targets
+        """Obtains a list of targets (labels) for all the examples
+        in the dataset."""
+        trainset = self.require_trainset()
+        targets = getattr(trainset, "targets", None)
+        if targets is None:
+            raise AttributeError(
+                "Training dataset does not expose `targets` attribute."
+            )
+        return targets
 
     def get_train_set(self):
-        """ Obtains the training dataset. """
-        return self.trainset
+        """Obtains the training dataset."""
+        return self.require_trainset()
 
     def get_test_set(self):
-        """ Obtains the validation dataset. """
+        """Obtains the validation dataset."""
+        return self.require_testset()
+
+    def require_trainset(self):
+        """Return the training dataset, ensuring it is available."""
+        if self.trainset is None:
+            raise RuntimeError("Training dataset has not been loaded yet.")
+        return self.trainset
+
+    def require_testset(self):
+        """Return the test dataset, ensuring it is available."""
+        if self.testset is None:
+            raise RuntimeError("Test dataset has not been loaded yet.")
         return self.testset

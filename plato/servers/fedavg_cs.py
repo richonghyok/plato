@@ -5,13 +5,14 @@ A cross-silo federated learning server using federated averaging, as either edge
 import asyncio
 import logging
 import os
+
 import numpy as np
 
 from plato.config import Config
 from plato.datasources import registry as datasources_registry
 from plato.processors import registry as processor_registry
-from plato.samplers import registry as samplers_registry
 from plato.samplers import all_inclusive
+from plato.samplers import registry as samplers_registry
 from plato.servers import fedavg
 from plato.utils import fonts
 
@@ -32,6 +33,7 @@ class Server(fedavg.Server):
 
         self.current_global_round = 0
         self.average_accuracy = 0
+        self.std_accuracy = 0
 
         if Config().is_edge_server():
             # An edge client waits for the event that a certain number of
@@ -114,12 +116,13 @@ class Server(fedavg.Server):
             )
 
             self.init_trainer()
-            self.trainer.set_client_id(Config().args.id)
+            trainer = self.require_trainer()
+            trainer.set_client_id(Config().args.id)
 
             # Prepares this server for processors that processes outbound and inbound
             # data payloads
             self.outbound_processor, self.inbound_processor = processor_registry.get(
-                "Server", server_id=os.getpid(), trainer=self.trainer
+                "Server", server_id=os.getpid(), trainer=trainer
             )
 
             if (
@@ -127,17 +130,18 @@ class Server(fedavg.Server):
                 and Config().server.edge_do_test
             ):
                 self.datasource = datasources_registry.get(client_id=0)
-                self.testset = self.datasource.get_test_set()
+                datasource = self.datasource
+                self.testset = datasource.get_test_set()
 
                 if hasattr(Config().data, "testset_sampler"):
                     # Set the sampler for test set
                     self.testset_sampler = samplers_registry.get(
-                        self.datasource, Config().args.id, testing=True
+                        datasource, Config().args.id, testing=True
                     )
                 else:
                     if hasattr(Config().data, "testset_size"):
                         self.testset_sampler = all_inclusive.Sampler(
-                            self.datasource, testing=True
+                            datasource, testing=True
                         )
 
     async def _select_clients(self, for_next_batch=False):
@@ -160,7 +164,8 @@ class Server(fedavg.Server):
     async def _process_reports(self):
         """Process the client reports by aggregating their weights."""
         # To pass the client_id == 0 assertion during aggregation
-        self.trainer.set_client_id(0)
+        trainer = self.require_trainer()
+        trainer.set_client_id(0)
 
         weights_received = [update.payload for update in self.updates]
 
@@ -168,7 +173,8 @@ class Server(fedavg.Server):
         self.callback_handler.call_event("on_weights_received", self, weights_received)
 
         # Extract the current model weights as the baseline
-        baseline_weights = self.algorithm.extract_weights()
+        algorithm = self.require_algorithm()
+        baseline_weights = algorithm.extract_weights()
 
         if hasattr(self, "aggregate_weights"):
             # Runs a server aggregation algorithm using weights rather than deltas
@@ -181,11 +187,11 @@ class Server(fedavg.Server):
             )
 
             # Loads the new model weights
-            self.algorithm.load_weights(updated_weights)
+            algorithm.load_weights(updated_weights)
         else:
             # Computes the weight deltas by comparing the weights received with
             # the current global model weights
-            deltas_received = self.algorithm.compute_weight_deltas(
+            deltas_received = algorithm.compute_weight_deltas(
                 baseline_weights, weights_received
             )
             # Runs a framework-agnostic server aggregation algorithm, such as
@@ -193,9 +199,9 @@ class Server(fedavg.Server):
             logging.info("[Server #%d] Aggregating model weight deltas.", os.getpid())
             deltas = await self.aggregate_deltas(self.updates, deltas_received)
             # Updates the existing model weights from the provided deltas
-            updated_weights = self.algorithm.update_weights(deltas)
+            updated_weights = algorithm.update_weights(deltas)
             # Loads the new model weights
-            self.algorithm.load_weights(updated_weights)
+            algorithm.load_weights(updated_weights)
 
         # The model weights have already been aggregated, now calls the
         # corresponding hook and callback
@@ -203,7 +209,7 @@ class Server(fedavg.Server):
         self.callback_handler.call_event("on_weights_aggregated", self, self.updates)
 
         if Config().is_edge_server():
-            self.trainer.set_client_id(Config().args.id)
+            trainer.set_client_id(Config().args.id)
 
         # Testing the model accuracy
         if (Config().is_edge_server() and Config().clients.do_test) or (
@@ -212,7 +218,10 @@ class Server(fedavg.Server):
             and Config().server.edge_do_test
         ):
             # Compute the average accuracy from client reports
-            self.average_accuracy = self.accuracy_averaging(self.updates)
+            (
+                self.average_accuracy,
+                self.std_accuracy,
+            ) = self.get_accuracy_mean_std(self.updates)
             logging.info(
                 "[%s] Average client accuracy: %.2f%%.",
                 self,
@@ -242,9 +251,24 @@ class Server(fedavg.Server):
         ):
             # Testing the updated model directly at the server
             logging.info("[%s] Started model testing.", self)
-            self.accuracy = self.trainer.test(self.testset, self.testset_sampler)
+            self.accuracy = trainer.test(self.testset, self.testset_sampler)
 
-            if hasattr(Config().trainer, "target_perplexity"):
+            # Extract CORE evaluation results if available (Nanochat CORE evaluation)
+            if (
+                hasattr(trainer, "context")
+                and "nanochat_core_results" in trainer.context.state
+            ):
+                core_results = trainer.context.state["nanochat_core_results"]
+                self._core_metric = core_results.get("core_metric", None)
+
+            core_metric = getattr(self, "_core_metric", None)
+            if core_metric is not None:
+                logging.info(
+                    fonts.colourize(
+                        f"[{self}] Average Centered CORE benchmark metric: {100 * core_metric:.2f}%\n"
+                    )
+                )
+            elif hasattr(Config().trainer, "target_perplexity"):
                 logging.info(
                     fonts.colourize(
                         f"[{self}] Global model perplexity: {self.accuracy:.2f}\n"
@@ -263,9 +287,24 @@ class Server(fedavg.Server):
         ):
             # Test the aggregated model directly at the edge server
             logging.info("[%s] Started model testing.", self)
-            self.accuracy = self.trainer.test(self.testset, self.testset_sampler)
+            self.accuracy = trainer.test(self.testset, self.testset_sampler)
 
-            if hasattr(Config().trainer, "target_perplexity"):
+            # Extract CORE evaluation results if available (Nanochat CORE evaluation)
+            if (
+                hasattr(trainer, "context")
+                and "nanochat_core_results" in trainer.context.state
+            ):
+                core_results = trainer.context.state["nanochat_core_results"]
+                self._core_metric = core_results.get("core_metric", None)
+
+            core_metric = getattr(self, "_core_metric", None)
+            if core_metric is not None:
+                logging.info(
+                    fonts.colourize(
+                        f"[{self}] Average Centered CORE benchmark metric: {100 * core_metric:.2f}%\n"
+                    )
+                )
+            elif hasattr(Config().trainer, "target_perplexity"):
                 logging.info(
                     fonts.colourize(
                         f"[{self}] Global model perplexity: {self.accuracy:.2f}\n"
@@ -279,6 +318,7 @@ class Server(fedavg.Server):
                 )
         else:
             self.accuracy = self.average_accuracy
+            self.accuracy_std = self.std_accuracy
 
         self.clients_processed()
         self.callback_handler.call_event("on_clients_processed", self)
@@ -309,7 +349,7 @@ class Server(fedavg.Server):
 
     def get_logged_items(self) -> dict:
         """Get items to be logged by the LogProgressCallback class in a .csv file."""
-        logged_items = super().get_logged_items()
+        logged_items = fedavg.Server.get_logged_items(self)
 
         logged_items["global_round"] = self.current_global_round
         logged_items["average_accuracy"] = self.average_accuracy

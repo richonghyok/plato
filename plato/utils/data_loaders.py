@@ -21,7 +21,6 @@ class ParallelIterator:
     one batch."""
 
     def __init__(self, defined_compound_loader):
-
         self.defined_compound_loader = defined_compound_loader
         self.compound_loaders = self.defined_compound_loader.loaders
         self.loader_iters = [iter(loader) for loader in self.compound_loaders]
@@ -34,7 +33,7 @@ class ParallelIterator:
         # terminates, this iterator will terminates.
         # The `StopIteration` raised inside that shortest loader's `__next__`
         # method will in turn gets out of this `__next__` method.
-        batches = [loader_iter.next() for loader_iter in self.loader_iters]
+        batches = [next(loader_iter) for loader_iter in self.loader_iters]
         return self.defined_compound_loader.combine_batch(batches)
 
     def __len__(self):
@@ -100,7 +99,6 @@ class SequentialIterator:
         return self
 
     def __next__(self):
-
         # When the final loader (the last loader in the input loaders)
         # terminates, this iterator will terminates.
         # The `StopIteration` raised inside that shortest loader's `__next__`
@@ -114,14 +112,14 @@ class SequentialIterator:
             cur_loader_idx -= 1
 
         loader_iter = self.loader_iters[cur_loader_idx]
-        batch = loader_iter.next()
+        batch = next(loader_iter)
 
         self.batch_idx += 1
 
         return self.defined_compound_loader.process_batch(batch)
 
     def __len__(self):
-        return len(self.target_loader)
+        return len(self.defined_compound_loader)
 
 
 class SequentialDataLoader:

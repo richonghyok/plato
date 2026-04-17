@@ -1,8 +1,18 @@
 """Callback examples  for test purpose"""
+
 import logging
+
 from plato.callbacks.client import ClientCallback
 from plato.callbacks.server import ServerCallback
 from plato.callbacks.trainer import TrainerCallback
+
+__all__ = [
+    "argumentClientCallback",
+    "dynamicClientCallback",
+    "argumentServerCallback",
+    "dynamicServerCallback",
+    "customTrainerCallback",
+]
 
 
 class argumentClientCallback(ClientCallback):
@@ -26,7 +36,7 @@ class dynamicServerCallback(ServerCallback):
 
 
 class customTrainerCallback(TrainerCallback):
-    def on_train_run_start(self, trainer, config):
+    def on_train_run_start(self, trainer, config, **kwargs):
         logging.info(
             f"[Client {trainer.client_id}] Trainer callback from dynamic adding."
         )

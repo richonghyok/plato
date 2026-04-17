@@ -1,17 +1,16 @@
 """
 Samples all the data from a dataset. Applicable in cases where the dataset comes from
-local sources only. Used by the Federated EMNIST dataset and the MistNet server.
+local sources only. Used by the Federated EMNIST dataset.
 """
+
 import random
 
-from plato.samplers import base
 from plato.config import Config
+from plato.samplers import base
 
 
 class Sampler(base.Sampler):
-    """Create a data sampler that samples all the data in the dataset.
-    Used by the MistNet server.
-    """
+    """Create a data sampler that samples all the data in the dataset."""
 
     def __init__(self, datasource, client_id=0, testing=False):
         super().__init__()
@@ -29,18 +28,11 @@ class Sampler(base.Sampler):
             self.data_samples = range(len(datasource.get_train_set()))
 
     def get(self):
-        if hasattr(Config().trainer, "use_mindspore"):
-            return list(self.data_samples)
-        elif hasattr(Config().trainer, "use_tensorflow"):
-            return list(self.data_samples)
-        else:
-            import torch
+        import torch
 
-            gen = torch.Generator()
-            gen.manual_seed(self.random_seed)
-            return torch.utils.data.SubsetRandomSampler(
-                self.data_samples, generator=gen
-            )
+        gen = torch.Generator()
+        gen.manual_seed(self.random_seed)
+        return torch.utils.data.SubsetRandomSampler(self.data_samples, generator=gen)
 
     def num_samples(self):
         """Returns the length of the dataset after sampling."""

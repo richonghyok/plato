@@ -4,88 +4,137 @@ The registry for machine learning models.
 Having a registry of all available classes is convenient for retrieving an instance
 based on a configuration at run-time.
 """
-from typing import Union
+
+from typing import Any, Dict, TypedDict, cast
 
 from plato.config import Config
+from plato.models import (
+    cnn_encoder,
+    dcgan,
+    general_multilayer,
+    huggingface,
+    lenet5,
+    multilayer,
+    nanochat,
+    resnet,
+    smolvla,
+    torch_hub,
+    vgg,
+    vit,
+)
 
-if hasattr(Config().trainer, "use_mindspore"):
-    from plato.models.mindspore import lenet5 as lenet5_mindspore
+try:  # pragma: no cover - optional MLX models
+    from plato.models.mlx import lenet5 as mlx_lenet5
+except ImportError:  # pragma: no cover
+    mlx_lenet5 = cast(Any, None)
 
-    registered_models = {"lenet5": lenet5_mindspore.Model}
-elif hasattr(Config().trainer, "use_tensorflow"):
-    from plato.models.tensorflow import lenet5 as lenet5_tensorflow
+registered_models = {
+    "lenet5": lenet5.Model,
+    "dcgan": dcgan.Model,
+    "multilayer": multilayer.Model,
+}
 
-    registered_models = {"lenet5": lenet5_tensorflow.Model}
-else:
-    from plato.models import (
-        lenet5,
-        dcgan,
-        multilayer,
-        resnet,
-        vgg,
-        cnn_encoder,
-        general_multilayer,
-        torch_hub,
-        huggingface,
-        vit,
-    )
+registered_factories = {
+    "resnet": resnet.Model,
+    "vgg": vgg.Model,
+    "cnn_encoder": cnn_encoder.Model,
+    "general_multilayer": general_multilayer.Model,
+    "torch_hub": torch_hub.Model,
+    "huggingface": huggingface.Model,
+    "vit": vit.Model,
+    "nanochat": nanochat.Model,
+    "smolvla": smolvla.Model,
+}
 
-    registered_models = {
-        "lenet5": lenet5.Model,
-        "dcgan": dcgan.Model,
-        "multilayer": multilayer.Model,
-    }
-
-    registered_factories = {
-        "resnet": resnet.Model,
-        "vgg": vgg.Model,
-        "cnn_encoder": cnn_encoder.Model,
-        "general_multilayer": general_multilayer.Model,
-        "torch_hub": torch_hub.Model,
-        "huggingface": huggingface.Model,
-        "vit": vit.Model,
-    }
+registered_mlx_models = {}
+if mlx_lenet5 is not None:
+    registered_mlx_models["mlx_lenet5"] = mlx_lenet5.Model
 
 
-def get(**kwargs: Union[str, dict]):
+class ModelKwargs(TypedDict, total=False):
+    model_name: str
+    model_type: str
+    model_params: dict[str, Any]
+
+
+def get(**kwargs: Any) -> Any:
     """Get the model with the provided name."""
-    model_name = (
-        kwargs["model_name"] if "model_name" in kwargs else Config().trainer.model_name
-    )
+    config = Config()
 
-    model_type = (
-        kwargs["model_type"]
-        if "model_type" in kwargs
-        else (
-            Config().trainer.model_type
-            if hasattr(Config().trainer, "model_type")
-            else model_name.split("_")[0]
-        )
-    )
+    # Get model name
+    model_name: str = ""
+    if "model_name" in kwargs:
+        model_name = cast(str, kwargs["model_name"])
+    elif hasattr(config, "trainer"):
+        trainer = getattr(config, "trainer")
+        if hasattr(trainer, "model_name"):
+            model_name = getattr(trainer, "model_name")
 
-    model_params = (
-        kwargs["model_params"]
-        if "model_params" in kwargs
-        else (
-            Config().parameters.model._asdict()
-            if hasattr(Config().parameters, "model")
-            else {}
-        )
-    )
+    # Get model type
+    model_type: str = ""
+    if "model_type" in kwargs:
+        model_type = cast(str, kwargs["model_type"])
+    elif hasattr(config, "trainer"):
+        trainer = getattr(config, "trainer")
+        if hasattr(trainer, "model_type"):
+            model_type = getattr(trainer, "model_type")
+
+    # Get model framework (optional)
+    model_framework: str = ""
+    if "model_framework" in kwargs:
+        model_framework = cast(str, kwargs["model_framework"])
+    elif hasattr(config, "trainer"):
+        trainer = getattr(config, "trainer")
+        if hasattr(trainer, "model_framework"):
+            model_framework = getattr(trainer, "model_framework")
+        elif hasattr(trainer, "framework"):
+            model_framework = getattr(trainer, "framework")
+
+    if not model_framework and hasattr(config, "parameters"):
+        parameters = getattr(config, "parameters")
+        if hasattr(parameters, "model") and hasattr(parameters.model, "_asdict"):
+            model_dict = parameters.model._asdict()
+            model_framework = model_dict.get("framework", "")
+
+    # If model_type is still empty, derive it from model_name
+    if not model_type and model_name:
+        model_type = model_name.split("_")[0]
+
+    # Get model parameters
+    model_params: dict[str, Any] = {}
+    if "model_params" in kwargs:
+        model_params = cast(dict[str, Any], kwargs["model_params"])
+    elif hasattr(config, "parameters"):
+        parameters = getattr(config, "parameters")
+        if hasattr(parameters, "model"):
+            model = getattr(parameters, "model")
+            if hasattr(model, "_asdict"):
+                model_params = model._asdict()
+
+    safe_params = {k: v for k, v in model_params.items() if k != "framework"}
+
+    framework = model_framework.lower()
+    if framework == "mlx":
+        candidate_keys = []
+        if model_type:
+            candidate_keys.append(f"{framework}_{model_type}")
+            candidate_keys.append(model_type)
+        if model_name:
+            candidate_keys.append(model_name)
+        for key in candidate_keys:
+            key_lower = key.lower()
+            if key_lower in registered_mlx_models:
+                return registered_mlx_models[key_lower](**safe_params)
+    elif model_name and model_name.lower() in registered_mlx_models:
+        return registered_mlx_models[model_name.lower()](**safe_params)
 
     if model_type in registered_models:
         registered_model = registered_models[model_type]
-        return registered_model(**model_params)
+        return registered_model(**safe_params)
 
     if model_type in registered_factories:
         return registered_factories[model_type].get(
             model_name=model_name, **model_params
         )
-
-    # The YOLOv5 model needs special handling as it needs to import third-party packages
-    if model_name == "yolov5":
-        from plato.models import yolov5
-
-        return yolov5.Model(**model_params)
 
     raise ValueError(f"No such model: {model_name}")

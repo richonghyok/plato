@@ -3,16 +3,17 @@ Necessary functions for the Flickr30K Entities dataset
 
 """
 
-import os
 import json
-import xml.etree.ElementTree as ET
 import logging
+import os
+import xml.etree.ElementTree as ET
+from typing import Any, Dict, List
 
 from plato.datasources.datalib import data_utils
 
 
 def phrase_boxes_alignment(flatten_boxes, ori_phrases_boxes):
-    """ align the bounding boxes with corresponding phrases. """
+    """align the bounding boxes with corresponding phrases."""
     phrases_boxes = []
 
     ori_pb_boxes_count = []
@@ -38,7 +39,7 @@ def phrase_boxes_alignment(flatten_boxes, ori_phrases_boxes):
 
 
 def filter_bad_boxes(boxes_coor):
-    """ Filter the boxes with wrong coordinates """
+    """Filter the boxes with wrong coordinates"""
     filted_boxes = []
     for box_coor in boxes_coor:
         [xmin, ymin, xmax, ymax] = box_coor
@@ -49,7 +50,7 @@ def filter_bad_boxes(boxes_coor):
 
 
 def get_sentence_data(parse_file_path):
-    """ Parses a sentence file from the Flickr30K Entities dataset
+    """Parses a sentence file from the Flickr30K Entities dataset
 
     Args:
         parse_file_path - full file path to the sentence file to parse
@@ -64,8 +65,8 @@ def get_sentence_data(parse_file_path):
                         phrase_id - an identifier for this phrase
                         phrase_type - a list of the coarse categories this phrase belongs to
     """
-    with open(parse_file_path, 'r') as opened_file:
-        sentences = opened_file.read().split('\n')
+    with open(parse_file_path) as opened_file:
+        sentences = opened_file.read().split("\n")
 
     annotations = []
     for sentence in sentences:
@@ -81,43 +82,46 @@ def get_sentence_data(parse_file_path):
         add_to_phrase = False
         for token in sentence.split():
             if add_to_phrase:
-                if token[-1] == ']':
+                if token[-1] == "]":
                     add_to_phrase = False
                     token = token[:-1]
                     current_phrase.append(token)
-                    phrases.append(' '.join(current_phrase))
+                    phrases.append(" ".join(current_phrase))
                     current_phrase = []
                 else:
                     current_phrase.append(token)
 
                 words.append(token)
             else:
-                if token[0] == '[':
+                if token[0] == "[":
                     add_to_phrase = True
                     first_word.append(len(words))
-                    parts = token.split('/')
+                    parts = token.split("/")
                     phrase_id.append(parts[1][3:])
                     phrase_type.append(parts[2:])
                 else:
                     words.append(token)
 
-        sentence_data = {'sentence': ' '.join(words), 'phrases': []}
-        for index, phrase, p_id, p_type in zip(first_word, phrases, phrase_id,
-                                               phrase_type):
-            sentence_data['phrases'].append({
-                'first_word_index': index,
-                'phrase': phrase,
-                'phrase_id': p_id,
-                'phrase_type': p_type
-            })
+        sentence_data = {"sentence": " ".join(words), "phrases": []}
+        for index, phrase, p_id, p_type in zip(
+            first_word, phrases, phrase_id, phrase_type
+        ):
+            sentence_data["phrases"].append(
+                {
+                    "first_word_index": index,
+                    "phrase": phrase,
+                    "phrase_id": p_id,
+                    "phrase_type": p_type,
+                }
+            )
 
         annotations.append(sentence_data)
 
     return annotations
 
 
-def get_annotations(parse_file_path):
-    """ Parses the xml files in the Flickr30K Entities dataset.
+def get_annotations(parse_file_path: str) -> dict[str, Any]:
+    """Parses the xml files in the Flickr30K Entities dataset.
     Args:
         parse_file_path - full file path to the annotations file to parse
     Return:
@@ -131,31 +135,62 @@ def get_annotations(parse_file_path):
     """
     tree = ET.parse(parse_file_path)
     root = tree.getroot()
-    size_container = root.findall('size')[0]
-    anno_info = {'boxes': {}, 'scene': [], 'nobox': []}
-    for size_element in size_container:
-        anno_info[size_element.tag] = int(size_element.text)
+    boxes: dict[str, list[list[int]]] = {}
+    scene: list[str] = []
+    nobox: list[str] = []
+    anno_info: dict[str, Any] = {"boxes": boxes, "scene": scene, "nobox": nobox}
 
-    for object_container in root.findall('object'):
-        for names in object_container.findall('name'):
-            box_id = names.text
-            box_container = object_container.findall('bndbox')
-            if len(box_container) > 0:
-                if box_id not in anno_info['boxes']:
-                    anno_info['boxes'][box_id] = []
-                xmin = int(box_container[0].findall('xmin')[0].text) - 1
-                ymin = int(box_container[0].findall('ymin')[0].text) - 1
-                xmax = int(box_container[0].findall('xmax')[0].text) - 1
-                ymax = int(box_container[0].findall('ymax')[0].text) - 1
-                anno_info['boxes'][box_id].append([xmin, ymin, xmax, ymax])
-            else:
-                nobndbox = int(object_container.findall('nobndbox')[0].text)
-                if nobndbox > 0:
-                    anno_info['nobox'].append(box_id)
+    size_container = root.findall("size")
+    if size_container:
+        for size_element in size_container[0]:
+            if size_element.text is None:
+                continue
+            try:
+                anno_info[size_element.tag] = int(size_element.text)
+            except ValueError:
+                logging.debug("Invalid integer for size attribute %s", size_element.tag)
 
-                scene = int(object_container.findall('scene')[0].text)
-                if scene > 0:
-                    anno_info['scene'].append(box_id)
+    for object_container in root.findall("object"):
+        for names in object_container.findall("name"):
+            box_id_text = names.text
+            if not box_id_text:
+                continue
+
+            box_container = object_container.findall("bndbox")
+            if box_container:
+                bbox = box_container[0]
+                coords: list[int] = []
+                for tag in ("xmin", "ymin", "xmax", "ymax"):
+                    element = bbox.find(tag)
+                    if element is None or element.text is None:
+                        coords = []
+                        break
+                    try:
+                        coords.append(int(element.text) - 1)
+                    except ValueError:
+                        coords = []
+                        break
+                if coords:
+                    boxes.setdefault(box_id_text, []).append(coords)
+                continue
+
+            nobndbox_element = object_container.find("nobndbox")
+            if nobndbox_element is not None and nobndbox_element.text:
+                try:
+                    nobndbox_value = int(nobndbox_element.text)
+                except ValueError:
+                    nobndbox_value = 0
+                if nobndbox_value > 0:
+                    nobox.append(box_id_text)
+
+            scene_element = object_container.find("scene")
+            if scene_element is not None and scene_element.text:
+                try:
+                    scene_value = int(scene_element.text)
+                except ValueError:
+                    scene_value = 0
+                if scene_value > 0:
+                    scene.append(box_id_text)
 
     return anno_info
 
@@ -175,7 +210,6 @@ def align_anno_sent(image_sents, image_annos):
     """
     aligned_items = []  # each item is a dict
     for sent_info in image_sents:
-
         img_sent = sent_info["sentence"]
         img_sent_phrases = []
         img_sent_phrases_type = []
@@ -220,36 +254,35 @@ def align_anno_sent(image_sents, image_annos):
     return aligned_items
 
 
-def integrate_data_to_json(splits_info,
-                           mm_data_info,
-                           data_types,
-                           split_wise=True,
-                           globally=True):
-    """ Integrate the data into one json file that contains aligned
-        annotation-sentence for each image.
-        
-        The integrated data info is presented as a dict type.
-        
-        Each item in dict contains image and one of its annotation.
+def integrate_data_to_json(
+    splits_info, mm_data_info, data_types, split_wise=True, globally=True
+):
+    """Integrate the data into one json file that contains aligned
+    annotation-sentence for each image.
 
-        For example, one randomly item:
-            {
-            ...,
-                "./data/Flickr30KEntities/test/test_Images/1011572216.jpg0"
-                 {"sentence": "bride and groom",
-                 "sentence_phrases": ["bride", "groom"],
-                "sentence_phrases_type": [["people"], ["people"]],
-                "sentence_phrases_id": ["370", "372"],
-                "sentence_phrases_boxes": [[[161, 21, 330, 357]], 
-                                            [[195, 82, 327, 241]]],
-                },
-            ....
-            }
-        """
+    The integrated data info is presented as a dict type.
 
-    def operate_integration(images_name, images_annotations_path,
-                            images_sentences_path):
-        """ Obtain the integrated for images. """
+    Each item in dict contains image and one of its annotation.
+
+    For example, one randomly item:
+        {
+        ...,
+            "./data/Flickr30KEntities/test/test_Images/1011572216.jpg0"
+             {"sentence": "bride and groom",
+             "sentence_phrases": ["bride", "groom"],
+            "sentence_phrases_type": [["people"], ["people"]],
+            "sentence_phrases_id": ["370", "372"],
+            "sentence_phrases_boxes": [[[161, 21, 330, 357]],
+                                        [[195, 82, 327, 241]]],
+            },
+        ....
+        }
+    """
+
+    def operate_integration(
+        images_name, images_annotations_path, images_sentences_path
+    ):
+        """Obtain the integrated for images."""
         integrated_data = dict()
         for image_name_idx, image_name in enumerate(images_name):
             image_sent_path = images_sentences_path[image_name_idx]
@@ -270,43 +303,41 @@ def integrate_data_to_json(splits_info,
     if split_wise:
         for split_type in list(splits_info.keys()):
             path = splits_info[split_type]["path"]
-            save_path = os.path.join(path,
-                                     split_type + "_integrated_data.json")
+            save_path = os.path.join(path, split_type + "_integrated_data.json")
             if os.path.exists(save_path):
-                logging.info("Integrating %s: the file already exists.",
-                             split_type)
+                logging.info("Integrating %s: the file already exists.", split_type)
                 continue
 
             split_data_types_samples_path = []
             for _, data_type in enumerate(data_types):
                 data_type_format = splits_info[split_type][data_type]["format"]
-                split_data_type_path = splits_info[split_type][data_type][
-                    "path"]
+                split_data_type_path = splits_info[split_type][data_type]["path"]
 
                 split_data_type_samples = data_utils.list_inorder(
-                    os.listdir(split_data_type_path),
-                    flag_str=data_type_format)
+                    os.listdir(split_data_type_path), flag_str=data_type_format
+                )
 
                 split_data_type_samples_path = [
                     os.path.join(split_data_type_path, sample)
                     for sample in split_data_type_samples
                 ]
 
-                split_data_types_samples_path.append(
-                    split_data_type_samples_path)
+                split_data_types_samples_path.append(split_data_type_samples_path)
 
             split_integrated_data = operate_integration(
                 images_name=split_data_types_samples_path[0],
                 images_annotations_path=split_data_types_samples_path[1],
-                images_sentences_path=split_data_types_samples_path[2])
-            with open(save_path, 'w', encoding='utf-8') as outfile:
+                images_sentences_path=split_data_types_samples_path[2],
+            )
+            with open(save_path, "w", encoding="utf-8") as outfile:
                 json.dump(split_integrated_data, outfile)
 
             logging.info("The integration process for %s is done.", split_type)
 
     if globally:
-        save_path = os.path.join(mm_data_info["data_path"],
-                                 "total_integrated_data.json")
+        save_path = os.path.join(
+            mm_data_info["data_path"], "total_integrated_data.json"
+        )
         if os.path.exists(save_path):
             logging.info("Gloablly integrated file already exists.")
             return
@@ -317,7 +348,8 @@ def integrate_data_to_json(splits_info,
             raw_data_type_path = mm_data_info[data_type]["path"]
 
             global_raw_type_samples = data_utils.list_inorder(
-                os.listdir(raw_data_type_path), flag_str=data_type_format)
+                os.listdir(raw_data_type_path), flag_str=data_type_format
+            )
 
             global_raw_type_samples_path = [
                 os.path.join(raw_data_type_path, sample)
@@ -328,8 +360,9 @@ def integrate_data_to_json(splits_info,
         global_integrated_data = operate_integration(
             images_name=raw_data_types_samples_path[0],
             images_annotations_path=raw_data_types_samples_path[1],
-            images_sentences_path=raw_data_types_samples_path[2])
-        with open(save_path, 'w', encoding='utf-8') as outfile:
+            images_sentences_path=raw_data_types_samples_path[2],
+        )
+        with open(save_path, "w", encoding="utf-8") as outfile:
             json.dump(global_integrated_data, outfile)
 
         logging.info("Integration for the whole dataset, Done.")
